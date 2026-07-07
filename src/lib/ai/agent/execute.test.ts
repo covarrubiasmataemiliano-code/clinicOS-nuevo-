@@ -358,4 +358,195 @@ describe('executeClinicalTool', () => {
     expect(db.store.conversations[0].ai_autoreply_disabled).toBe(true)
     expect(db.store.notifications[0].type).toBe('ai_escalation')
   })
+
+  it('consultar_datos_pago devuelve solo las cuentas activas de la cuenta', async () => {
+    const db = fakeDb({
+      payment_accounts: [
+        {
+          id: 'pa-1',
+          account_id: ACCOUNT,
+          bank: 'BBVA',
+          holder: 'Dr. Ángel Zavala Díaz',
+          clabe: '012345678901234567',
+          account_number: null,
+          instructions: 'Envía tu comprobante por aquí',
+          is_active: true,
+        },
+        { id: 'pa-2', account_id: ACCOUNT, bank: 'Santander', holder: 'X', is_active: false },
+        { id: 'pa-3', account_id: 'otra-cuenta', bank: 'HSBC', holder: 'Y', is_active: true },
+      ],
+    })
+    const res = await executeClinicalTool('consultar_datos_pago', {}, ctxWith(db))
+    const out = JSON.parse(res.content)
+    expect(out.ok).toBe(true)
+    expect(out.cuentas).toHaveLength(1)
+    expect(out.cuentas[0].banco).toBe('BBVA')
+    expect(out.cuentas[0].clabe).toBe('012345678901234567')
+    expect(out.instruccion_para_paciente).toContain('comprobante')
+  })
+
+  it('consultar_datos_pago sin cuentas manda a avisar al equipo, no a inventar', async () => {
+    const db = fakeDb()
+    const res = await executeClinicalTool('consultar_datos_pago', {}, ctxWith(db))
+    const out = JSON.parse(res.content)
+    expect(out.ok).toBe(true)
+    expect(out.cuentas).toHaveLength(0)
+    expect(out.nota).toContain('NO inventes')
+  })
+
+  it('consultar_mis_citas lista solo las citas del contacto con su estado', async () => {
+    const db = fakeDb({
+      appointments: [
+        {
+          id: 'a-1',
+          account_id: ACCOUNT,
+          contact_id: CONTACT,
+          status: 'pendiente',
+          deposit_status: 'pendiente',
+          deposit_amount: '350',
+          appointment_type: 'valoracion',
+          starts_at: '2026-07-10T22:00:00Z',
+          ends_at: '2026-07-10T23:00:00Z',
+        },
+        {
+          id: 'a-otro',
+          account_id: ACCOUNT,
+          contact_id: 'otro',
+          status: 'confirmada',
+          deposit_status: 'pagado',
+          appointment_type: 'valoracion',
+          starts_at: '2026-07-11T22:00:00Z',
+          ends_at: '2026-07-11T23:00:00Z',
+        },
+      ],
+    })
+    const res = await executeClinicalTool('consultar_mis_citas', {}, ctxWith(db))
+    const out = JSON.parse(res.content)
+    expect(out.ok).toBe(true)
+    expect(out.citas).toHaveLength(1)
+    expect(out.citas[0].estado).toBe('pendiente de confirmar')
+    expect(out.citas[0].anticipo).toContain('350')
+    expect(out.recordatorio).toContain('NO está confirmada')
+  })
+
+  it('cancelar_cita cancela la cita activa y notifica al equipo', async () => {
+    const db = fakeDb({
+      appointments: [
+        {
+          id: 'a-1',
+          account_id: ACCOUNT,
+          contact_id: CONTACT,
+          status: 'pendiente',
+          deposit_status: 'pendiente',
+          deposit_amount: '350',
+          starts_at: '2026-07-10T22:00:00Z',
+          ends_at: '2026-07-10T23:00:00Z',
+        },
+      ],
+    })
+    const res = await executeClinicalTool(
+      'cancelar_cita',
+      { motivo: 'ya no puede asistir' },
+      ctxWith(db),
+    )
+    const out = JSON.parse(res.content)
+    expect(out.ok).toBe(true)
+    expect(db.store.appointments[0].status).toBe('cancelada')
+    expect(db.store.notifications[0].type).toBe('ai_appointment_cancelled')
+    expect(out.instruccion_para_paciente).toContain('anticipos')
+  })
+
+  it('cancelar_cita sin cita activa devuelve error corregible', async () => {
+    const db = fakeDb()
+    const res = await executeClinicalTool('cancelar_cita', {}, ctxWith(db))
+    expect(res.isError).toBe(true)
+  })
+
+  // --- Embudo → pipeline visual (deals) ------------------------
+
+  it('clasificar_lead crea el pipeline "Embudo IA" con etapas y el deal del lead', async () => {
+    const db = fakeDb({ contacts: [{ id: CONTACT, account_id: ACCOUNT, name: null }] })
+    await executeClinicalTool(
+      'clasificar_lead',
+      { etapa: 'interesado', nombre: 'María López' },
+      ctxWith(db),
+    )
+    expect(db.store.pipelines).toHaveLength(1)
+    expect(db.store.pipelines[0].name).toBe('Embudo IA')
+    expect(db.store.pipeline_stages.map((s) => s.name)).toContain('Anticipo en revisión')
+    const deal = db.store.deals[0]
+    expect(deal.title).toBe('María López')
+    expect(deal.status).toBe('open')
+    const stage = db.store.pipeline_stages.find((s) => s.id === deal.stage_id)
+    expect(stage?.name).toBe('Interesado')
+  })
+
+  it('el embudo visual solo avanza: no regresa un deal que ya va adelante', async () => {
+    const db = fakeDb({ contacts: [{ id: CONTACT, account_id: ACCOUNT, name: 'María López' }] })
+    const ctx = ctxWith(db)
+    await executeClinicalTool('clasificar_lead', { etapa: 'interesado' }, ctx)
+    await executeClinicalTool('clasificar_lead', { etapa: 'pregunton' }, ctx)
+    expect(db.store.deals).toHaveLength(1)
+    const stage = db.store.pipeline_stages.find(
+      (s) => s.id === db.store.deals[0].stage_id,
+    )
+    expect(stage?.name).toBe('Interesado')
+  })
+
+  it('agendar_cita avanza el deal a "Cita apartada" con el valor del procedimiento', async () => {
+    const db = fakeDb({
+      clinic_hours: HOURS,
+      procedures: [PROC],
+      contacts: [{ id: CONTACT, account_id: ACCOUNT, name: 'María López' }],
+    })
+    const ctx = ctxWith(db)
+    await executeClinicalTool('clasificar_lead', { etapa: 'interesado' }, ctx)
+    await executeClinicalTool(
+      'agendar_cita',
+      { inicio: '2026-07-08T12:00', procedure_id: 'proc-1' },
+      ctx,
+    )
+    expect(db.store.deals).toHaveLength(1)
+    const deal = db.store.deals[0]
+    const stage = db.store.pipeline_stages.find((s) => s.id === deal.stage_id)
+    expect(stage?.name).toBe('Cita apartada')
+    expect(Number(deal.value)).toBe(500)
+  })
+
+  it('prevalidar_anticipo avanza el deal a "Anticipo en revisión"', async () => {
+    const db = fakeDb({
+      procedures: [PROC],
+      contacts: [{ id: CONTACT, account_id: ACCOUNT, name: 'María López' }],
+      appointments: [
+        {
+          id: 'a-1',
+          account_id: ACCOUNT,
+          contact_id: CONTACT,
+          status: 'pendiente',
+          deposit_status: 'pendiente',
+          deposit_amount: '300',
+          procedure_id: 'proc-1',
+          starts_at: '2026-07-09T17:00:00Z',
+          ends_at: '2026-07-09T17:30:00Z',
+        },
+      ],
+    })
+    await executeClinicalTool(
+      'prevalidar_anticipo',
+      { comprobante_url: 'https://x/recibo.jpg' },
+      ctxWith(db),
+    )
+    const deal = db.store.deals[0]
+    const stage = db.store.pipeline_stages.find((s) => s.id === deal.stage_id)
+    expect(stage?.name).toBe('Anticipo en revisión')
+  })
+
+  it('clasificar_lead spam cierra el deal como perdido', async () => {
+    const db = fakeDb({ contacts: [{ id: CONTACT, account_id: ACCOUNT, name: 'X' }] })
+    const ctx = ctxWith(db)
+    await executeClinicalTool('clasificar_lead', { etapa: 'interesado' }, ctx)
+    await executeClinicalTool('clasificar_lead', { etapa: 'spam' }, ctx)
+    expect(db.store.deals).toHaveLength(1)
+    expect(db.store.deals[0].status).toBe('lost')
+  })
 })

@@ -155,7 +155,7 @@ async function findActiveAppointment(ctx: AgentToolContext) {
 async function loadProcedure(ctx: AgentToolContext, procedureId: string) {
   const { data } = await ctx.db
     .from('procedures')
-    .select('id, name, duration_minutes, deposit_amount, currency, is_active')
+    .select('id, name, duration_minutes, deposit_amount, price_min, currency, is_active')
     .eq('account_id', ctx.accountId)
     .eq('id', procedureId)
     .maybeSingle()
@@ -178,6 +178,155 @@ async function dropNotification(
     title,
     body,
   })
+}
+
+// ------------------------------------------------------------
+// Embudo → pipeline visual (/pipelines)
+//
+// El embudo del agente (tags `lead:*`) y el tablero de deals eran dos
+// mundos separados: un lead calificado por la IA no aparecía en el
+// tablero de ventas. Estos helpers reflejan cada hito en un pipeline
+// dedicado ("Embudo IA") que se crea solo la primera vez — mismo
+// patrón self-healing que las tags de clasificar_lead.
+// ------------------------------------------------------------
+
+const FUNNEL_PIPELINE_NAME = 'Embudo IA'
+
+// Etapas espejo del embudo legacy: preguntón → interesado →
+// seguimiento → cita apartada → anticipo en revisión → agendado.
+// "Agendado" la mueve el equipo al confirmar el anticipo en el panel.
+const FUNNEL_STAGES = [
+  { name: 'Preguntón', color: '#94a3b8' },
+  { name: 'Interesado', color: '#3b82f6' },
+  { name: 'Seguimiento futuro', color: '#f59e0b' },
+  { name: 'Cita apartada', color: '#8b5cf6' },
+  { name: 'Anticipo en revisión', color: '#f97316' },
+  { name: 'Agendado', color: '#22c55e' },
+] as const
+type FunnelStageName = (typeof FUNNEL_STAGES)[number]['name']
+
+const STAGE_BY_LEAD: Record<string, FunnelStageName> = {
+  pregunton: 'Preguntón',
+  interesado: 'Interesado',
+  seguimiento_futuro: 'Seguimiento futuro',
+}
+
+async function ensureFunnelPipeline(
+  ctx: AgentToolContext,
+): Promise<string | null> {
+  const { data: existing } = await ctx.db
+    .from('pipelines')
+    .select('id')
+    .eq('account_id', ctx.accountId)
+    .eq('name', FUNNEL_PIPELINE_NAME)
+    .maybeSingle()
+  if (existing) return existing.id
+
+  const { data: created } = await ctx.db
+    .from('pipelines')
+    .insert({
+      account_id: ctx.accountId,
+      user_id: ctx.userId,
+      name: FUNNEL_PIPELINE_NAME,
+    })
+    .select('id')
+    .single()
+  if (!created) return null
+
+  await ctx.db.from('pipeline_stages').insert(
+    FUNNEL_STAGES.map((s, i) => ({
+      pipeline_id: created.id,
+      name: s.name,
+      color: s.color,
+      position: i,
+    })),
+  )
+  return created.id
+}
+
+/**
+ * Refleja el avance del lead en el tablero de deals. Best-effort: un
+ * tablero roto no debe tumbar la herramienta que lo invoca (el embudo
+ * con tags sigue siendo la fuente de verdad del agente), así que
+ * cualquier fallo aquí se traga en silencio.
+ */
+async function syncFunnelDeal(
+  ctx: AgentToolContext,
+  stageName: FunnelStageName,
+  opts: { title?: string | null; value?: number | null } = {},
+): Promise<void> {
+  try {
+    const pipelineId = await ensureFunnelPipeline(ctx)
+    if (!pipelineId) return
+
+    const { data: stages } = await ctx.db
+      .from('pipeline_stages')
+      .select('id, name, position')
+      .eq('pipeline_id', pipelineId)
+    const target = (stages ?? []).find((s) => s.name === stageName)
+    if (!target) return
+
+    const { data: deal } = await ctx.db
+      .from('deals')
+      .select('id, stage_id')
+      .eq('account_id', ctx.accountId)
+      .eq('contact_id', ctx.contactId)
+      .eq('pipeline_id', pipelineId)
+      .eq('status', 'open')
+      .limit(1)
+      .maybeSingle()
+
+    const title = opts.title?.trim() || ctx.contactName || 'Lead WhatsApp'
+    if (deal) {
+      // El embudo solo avanza: no regreses una tarjeta que ya va adelante.
+      const current = (stages ?? []).find((s) => s.id === deal.stage_id)
+      if (current && current.position > target.position) return
+      const patch: Record<string, unknown> = { stage_id: target.id, title }
+      if (opts.value != null && opts.value > 0) patch.value = opts.value
+      await ctx.db
+        .from('deals')
+        .update(patch)
+        .eq('id', deal.id)
+        .eq('account_id', ctx.accountId)
+    } else {
+      await ctx.db.from('deals').insert({
+        account_id: ctx.accountId,
+        user_id: ctx.userId,
+        pipeline_id: pipelineId,
+        stage_id: target.id,
+        contact_id: ctx.contactId,
+        conversation_id: ctx.conversationId,
+        title,
+        value: opts.value != null && opts.value > 0 ? opts.value : 0,
+        currency: 'MXN',
+        status: 'open',
+      })
+    }
+  } catch {
+    // best-effort — el embudo con tags sigue siendo la fuente de verdad.
+  }
+}
+
+/** Cierra como perdido el deal del embudo (spam). Best-effort. */
+async function closeFunnelDeal(ctx: AgentToolContext): Promise<void> {
+  try {
+    const { data: pipeline } = await ctx.db
+      .from('pipelines')
+      .select('id')
+      .eq('account_id', ctx.accountId)
+      .eq('name', FUNNEL_PIPELINE_NAME)
+      .maybeSingle()
+    if (!pipeline) return
+    await ctx.db
+      .from('deals')
+      .update({ status: 'lost' })
+      .eq('account_id', ctx.accountId)
+      .eq('contact_id', ctx.contactId)
+      .eq('pipeline_id', pipeline.id)
+      .eq('status', 'open')
+  } catch {
+    // best-effort
+  }
 }
 
 // ------------------------------------------------------------
@@ -282,6 +431,89 @@ async function consultarDisponibilidad(
       slots.length === 0
         ? `No hay huecos libres en los próximos ${days} días. Ofrece otra fecha o escala.`
         : 'Ofrece al paciente máximo dos opciones (una en la mañana y una en la tarde).',
+  })
+}
+
+async function consultarDatosPago(ctx: AgentToolContext): Promise<ToolExecResult> {
+  const { data, error } = await ctx.db
+    .from('payment_accounts')
+    .select('bank, holder, clabe, account_number, instructions')
+    .eq('account_id', ctx.accountId)
+    .eq('is_active', true)
+    .order('created_at', { ascending: true })
+  if (error) return fail(`No pude leer los datos de pago: ${error.message}`)
+
+  if (!data || data.length === 0) {
+    return ok({
+      ok: true,
+      cuentas: [],
+      nota:
+        'La clínica no tiene datos bancarios configurados. NO inventes una cuenta: dile al paciente que en un momento el equipo le comparte los datos por aquí, y deja el aviso con avisar_equipo.',
+    })
+  }
+
+  return ok({
+    ok: true,
+    cuentas: data.map((c) => ({
+      banco: c.bank,
+      titular: c.holder,
+      clabe: c.clabe ?? null,
+      cuenta: c.account_number ?? null,
+      indicaciones: c.instructions ?? null,
+    })),
+    instruccion_para_paciente:
+      'Comparte SOLO estos datos, tal cual, y pídele el comprobante (imagen) para prevalidar su anticipo. Nunca dictes datos bancarios distintos a estos.',
+  })
+}
+
+const APPT_STATUS_LABEL: Record<string, string> = {
+  pendiente: 'pendiente de confirmar',
+  confirmada: 'confirmada',
+  completada: 'completada',
+  cancelada: 'cancelada',
+  no_asistio: 'no asistió',
+}
+
+async function consultarMisCitas(ctx: AgentToolContext): Promise<ToolExecResult> {
+  const { data, error } = await ctx.db
+    .from('appointments')
+    .select('id, starts_at, status, deposit_status, deposit_amount, appointment_type')
+    .eq('account_id', ctx.accountId)
+    .eq('contact_id', ctx.contactId)
+    .order('starts_at', { ascending: false })
+    .limit(5)
+  if (error) return fail(`No pude leer las citas: ${error.message}`)
+
+  if (!data || data.length === 0) {
+    return ok({
+      ok: true,
+      citas: [],
+      nota: 'El paciente no tiene citas registradas. Ofrécele agendar una valoración.',
+    })
+  }
+
+  const citas = data.map((a) => {
+    const dep = num(a.deposit_amount)
+    return {
+      id: a.id,
+      cuando: formatSlotLabel(new Date(a.starts_at), ctx.timezone),
+      estado: APPT_STATUS_LABEL[a.status] ?? a.status,
+      tipo: a.appointment_type,
+      anticipo:
+        a.deposit_status === 'pendiente'
+          ? `pendiente${dep != null ? ` (${money(dep)})` : ''}`
+          : a.deposit_status === 'pagado'
+            ? 'pagado'
+            : 'no aplica',
+      ya_paso: new Date(a.starts_at).getTime() < ctx.now.getTime(),
+    }
+  })
+
+  return ok({
+    ok: true,
+    citas,
+    recordatorio:
+      'Una cita "pendiente de confirmar" NO está confirmada: el equipo la confirma al validar el anticipo. No le digas al paciente que ya quedó en firme si sigue pendiente.',
   })
 }
 
@@ -406,6 +638,9 @@ async function agendarCita(
     }.`,
   )
 
+  // Hito del embudo: la cita apartada mueve el deal en el tablero.
+  await syncFunnelDeal(ctx, 'Cita apartada', { value: num(proc?.price_min) })
+
   return ok({
     ok: true,
     appointment_id: appointmentId,
@@ -502,6 +737,9 @@ async function prevalidarAnticipo(
     )} (${metodo}). Revisa el comprobante y confírmalo en el panel.`,
   )
 
+  // Hito del embudo: comprobante recibido → el deal avanza a revisión.
+  await syncFunnelDeal(ctx, 'Anticipo en revisión')
+
   return ok({
     ok: true,
     payment_id: payment.id,
@@ -509,6 +747,54 @@ async function prevalidarAnticipo(
     estado: 'en_revision',
     instruccion_para_paciente:
       'Dile TEXTUALMENTE que recibiste su comprobante y quedó EN REVISIÓN del equipo, y que le avisas por aquí en cuanto quede confirmado. NUNCA digas que el pago o la cita quedaron confirmados.',
+  })
+}
+
+async function cancelarCita(
+  ctx: AgentToolContext,
+  input: { appointment_id?: string; motivo?: string },
+): Promise<ToolExecResult> {
+  let appointment = null as Awaited<ReturnType<typeof findActiveAppointment>>
+  if (input.appointment_id) {
+    const { data } = await ctx.db
+      .from('appointments')
+      .select('id, starts_at, ends_at, status, deposit_status, deposit_amount, procedure_id')
+      .eq('account_id', ctx.accountId)
+      .eq('contact_id', ctx.contactId)
+      .eq('id', input.appointment_id)
+      .in('status', ['pendiente', 'confirmada'])
+      .maybeSingle()
+    appointment = data as never
+  } else {
+    appointment = await findActiveAppointment(ctx)
+  }
+  if (!appointment) {
+    return fail('El paciente no tiene una cita activa que cancelar.')
+  }
+
+  const { error } = await ctx.db
+    .from('appointments')
+    .update({ status: 'cancelada' })
+    .eq('id', appointment.id)
+    .eq('account_id', ctx.accountId)
+  if (error) return fail(`No pude cancelar la cita: ${error.message}`)
+
+  const label = formatSlotLabel(new Date(appointment.starts_at), ctx.timezone)
+  await dropNotification(
+    ctx,
+    'ai_appointment_cancelled',
+    'El agente canceló una cita',
+    `${ctx.contactName ?? 'Un paciente'} canceló su cita del ${label}${
+      input.motivo ? ` — ${input.motivo}` : ''
+    }.`,
+  )
+
+  return ok({
+    ok: true,
+    appointment_id: appointment.id,
+    estado: 'cancelada',
+    instruccion_para_paciente:
+      'Confírmale la cancelación con calidez y aplica la política de anticipos de la clínica tal como está en tu contexto (no inventes reembolsos). Déjale la puerta abierta a reagendar cuando guste.',
   })
 }
 
@@ -570,6 +856,15 @@ async function clasificarLead(
         { contact_id: ctx.contactId, tag_id: tagId },
         { onConflict: 'contact_id,tag_id' },
       )
+  }
+
+  // Refleja la etapa en el tablero de deals; spam cierra el deal.
+  if (input.etapa === 'spam') {
+    await closeFunnelDeal(ctx)
+  } else {
+    await syncFunnelDeal(ctx, STAGE_BY_LEAD[input.etapa], {
+      title: input.nombre?.trim() || null,
+    })
   }
 
   return ok({
@@ -648,10 +943,16 @@ export async function executeClinicalTool(
         return await consultarCatalogo(ctx, args)
       case 'consultar_disponibilidad':
         return await consultarDisponibilidad(ctx, args)
+      case 'consultar_datos_pago':
+        return await consultarDatosPago(ctx)
+      case 'consultar_mis_citas':
+        return await consultarMisCitas(ctx)
       case 'agendar_cita':
         return await agendarCita(ctx, args)
       case 'prevalidar_anticipo':
         return await prevalidarAnticipo(ctx, args)
+      case 'cancelar_cita':
+        return await cancelarCita(ctx, args)
       case 'clasificar_lead':
         return await clasificarLead(ctx, args)
       case 'avisar_equipo':

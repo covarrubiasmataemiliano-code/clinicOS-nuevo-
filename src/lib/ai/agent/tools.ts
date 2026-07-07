@@ -140,6 +140,24 @@ export const CLINICAL_TOOLS = [
     },
   },
   {
+    name: 'consultar_datos_pago',
+    description:
+      'Devuelve los datos bancarios OFICIALES de la clínica (banco, titular, CLABE/cuenta) para que el paciente pague su anticipo. Úsala DESPUÉS de apartar la cita con agendar_cita, nunca antes. NUNCA dictes datos bancarios de memoria: comparte únicamente lo que devuelva esta herramienta, y si no devuelve cuentas, avisa al equipo en vez de inventarlos.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'consultar_mis_citas',
+    description:
+      'Devuelve las citas del paciente de ESTA conversación (las más recientes primero) con su fecha, estado y estado del anticipo. Úsala cuando pregunte por su cita ("cuándo era mi cita", "sí quedó mi cita", "a qué hora paso") — nunca respondas de memoria. Recuerda: una cita "pendiente de confirmar" NO está confirmada.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
     name: 'agendar_cita',
     description:
       'APARTA una cita para el paciente. La cita queda PENDIENTE hasta que el equipo la confirme en el panel — nunca digas que quedó "confirmada" o "agendada en firme". Si el paciente ya tiene una cita pendiente, esta herramienta la REAGENDA (no crea una segunda). Si el procedimiento requiere anticipo, díselo y pídele el comprobante para prevalidarlo.',
@@ -198,6 +216,25 @@ export const CLINICAL_TOOLS = [
         comprobante_url: {
           type: 'string',
           description: 'URL del comprobante que envió el paciente, si la hay.',
+        },
+      },
+    },
+  },
+  {
+    name: 'cancelar_cita',
+    description:
+      'Cancela la cita del paciente cuando ÉL lo pide de forma explícita. Antes de cancelar en definitiva, ofrécele reagendar (agendar_cita mueve su cita activa a otra fecha); cancela solo si insiste. Al confirmarle la cancelación, aplica la política de anticipos de la clínica tal como está en tu contexto.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        appointment_id: {
+          type: 'string',
+          description:
+            'ID de la cita a cancelar. Omítelo para cancelar la cita activa del paciente.',
+        },
+        motivo: {
+          type: 'string',
+          description: 'Motivo que dio el paciente (para el equipo).',
         },
       },
     },
