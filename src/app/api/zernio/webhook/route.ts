@@ -31,18 +31,6 @@ export async function POST(request: Request) {
     request.headers.get('x-zernio-signature')
   const { webhookSecret } = getZernioConfig()
 
-  // DEBUG TEMPORAL (Zernio go-live): revela el nombre real del header de
-  // firma, su valor y el inicio del payload, para ajustar la verificación
-  // al formato exacto de Zernio. QUITAR una vez alineada la firma.
-  console.log(
-    '[zernio-debug] headers:',
-    JSON.stringify([...request.headers.keys()]),
-    '| x-zernio-signature:',
-    signature ?? '(none)',
-    '| body:',
-    rawBody.slice(0, 160),
-  )
-
   const policy = zernioWebhookSecretPolicy(webhookSecret)
   if (policy === 'reject') {
     // Fail closed in production — an unset secret would otherwise
