@@ -299,7 +299,34 @@ export async function dispatchInboundToAiReply(
       return
     }
 
-    if (zernioConversationId) {
+    try {
+      await sendReply()
+    } catch (sendErr) {
+      // El envío falló (API key de Zernio revocada, Meta caído, red…):
+      // el agente ya "respondió" pero el paciente no recibió nada. La
+      // lección Acerotech aplicada a la capa de transporte: nunca
+      // silencio — el equipo recibe un aviso para tomar el hilo.
+      console.error('[ai auto-reply] outbound send failed:', sendErr)
+      await notifySendFailureOnce(db, {
+        accountId,
+        conversationId,
+        contactId,
+        configOwnerUserId,
+      })
+      return
+    }
+
+    async function sendReply(): Promise<void> {
+      if (!zernioConversationId) {
+        await engineSendText({
+          accountId,
+          userId: configOwnerUserId,
+          conversationId,
+          contactId,
+          text,
+        })
+        return
+      }
       // Vino por Zernio: responde en la MISMA conversación de inbox
       // (texto libre dentro de la ventana de 24h) y persiste el mensaje
       // del bot nosotros mismos — engineSendText es por-teléfono y la
@@ -362,14 +389,6 @@ export async function dispatchInboundToAiReply(
           updated_at: new Date().toISOString(),
         })
         .eq('id', conversationId)
-    } else {
-      await engineSendText({
-        accountId,
-        userId: configOwnerUserId,
-        conversationId,
-        contactId,
-        text,
-      })
     }
   } catch (err) {
     console.error('[ai auto-reply] dispatch failed:', err)
@@ -429,6 +448,56 @@ async function retireConversationToHumans(
     })
   } catch (err) {
     console.error('[ai auto-reply] retire-to-humans failed:', err)
+  }
+}
+
+/** Título estable del aviso de envío fallido — es también la llave del dedupe. */
+const SEND_FAILURE_TITLE = 'No se pudo enviar la respuesta del agente'
+
+/**
+ * Aviso al equipo cuando la respuesta se generó pero el ENVÍO falló
+ * (p. ej. la API key de Zernio fue revocada o el servicio está caído).
+ * A diferencia del tope/handoff NO apaga el modo IA: un fallo
+ * transitorio se recupera solo con el siguiente inbound. El candado
+ * anti-spam es temporal — máximo un aviso por conversación por hora.
+ * Best-effort: nunca lanza.
+ */
+async function notifySendFailureOnce(
+  db: SupabaseClient,
+  args: Omit<RetireArgs, 'title' | 'body'>,
+): Promise<void> {
+  try {
+    const sinceIso = new Date(Date.now() - 60 * 60_000).toISOString()
+    const { data: recent } = await db
+      .from('notifications')
+      .select('id')
+      .eq('conversation_id', args.conversationId)
+      .eq('type', 'ai_escalation')
+      .eq('title', SEND_FAILURE_TITLE)
+      .gte('created_at', sinceIso)
+      .limit(1)
+      .maybeSingle()
+    if (recent) return
+
+    const { data: contact } = await db
+      .from('contacts')
+      .select('name, phone')
+      .eq('id', args.contactId)
+      .maybeSingle()
+    const who = contact?.name || contact?.phone || 'Un paciente'
+
+    await db.from('notifications').insert({
+      account_id: args.accountId,
+      user_id: args.configOwnerUserId,
+      type: 'ai_escalation',
+      conversation_id: args.conversationId,
+      contact_id: args.contactId,
+      actor_user_id: null,
+      title: SEND_FAILURE_TITLE,
+      body: `${who} escribió y el agente generó su respuesta, pero el envío por WhatsApp falló. Revisa la conexión con Zernio (API key / suscripción) y respóndele tú desde el panel.`,
+    })
+  } catch (err) {
+    console.error('[ai auto-reply] send-failure notice failed:', err)
   }
 }
 

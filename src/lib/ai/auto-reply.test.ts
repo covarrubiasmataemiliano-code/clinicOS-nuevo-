@@ -86,6 +86,27 @@ vi.mock('./admin-client', () => ({
             h.state.notifications.push(row)
             return Promise.resolve({ error: null })
           },
+          // Dedupe de notifySendFailureOnce: ¿ya hay un aviso con este
+          // título para la conversación? El mock filtra por el eq('title').
+          select: () => {
+            let titleFilter: unknown = null
+            const chain = {
+              eq: (col: string, val: unknown) => {
+                if (col === 'title') titleFilter = val
+                return chain
+              },
+              gte: () => chain,
+              limit: () => chain,
+              maybeSingle: () =>
+                Promise.resolve({
+                  data: h.state.notifications.some((n) => n.title === titleFilter)
+                    ? { id: 'notif-1' }
+                    : null,
+                  error: null,
+                }),
+            }
+            return chain
+          },
         }
       }
       if (table === 'contacts') {
@@ -480,6 +501,65 @@ describe('dispatchInboundToAiReply — zernio echo dedupe', () => {
     } finally {
       errSpy.mockRestore()
     }
+  })
+})
+
+// El envío puede fallar aunque la respuesta se haya generado (la API
+// key de Zernio revocada fue el caso real: 401 en cada send y el
+// agente "contestaba" al vacío sin que nadie se enterara).
+describe('dispatchInboundToAiReply — envío fallido', () => {
+  beforeEach(() => {
+    h.state.messagesEchoRows = []
+    h.state.messagesUpdates = []
+    h.state.messagesInserts = []
+    h.state.messagesInsertError = null
+  })
+
+  it('meta: notifica al equipo cuando el envío falla, SIN apagar el modo IA', async () => {
+    h.engineSendText.mockRejectedValue(new Error('Zernio API error: 401'))
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await dispatchInboundToAiReply(ARGS)
+    } finally {
+      errSpy.mockRestore()
+    }
+    expect(h.state.notifications).toHaveLength(1)
+    expect(h.state.notifications[0].title).toBe(
+      'No se pudo enviar la respuesta del agente',
+    )
+    expect(h.state.notifications[0].type).toBe('ai_escalation')
+    // La IA queda encendida: un fallo transitorio se recupera solo en
+    // el siguiente inbound (a diferencia del tope/handoff).
+    expect(h.state.conv?.ai_autoreply_disabled).toBe(false)
+  })
+
+  it('zernio: el 401 del envío por inbox también avisa', async () => {
+    h.zernioSendToConversation.mockRejectedValue(new Error('Zernio API error: 401'))
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await dispatchInboundToAiReply({ ...ARGS, zernioConversationId: 'zconv-1' })
+    } finally {
+      errSpy.mockRestore()
+    }
+    expect(h.state.notifications).toHaveLength(1)
+    expect(h.state.notifications[0].title).toBe(
+      'No se pudo enviar la respuesta del agente',
+    )
+    // No se persistió ningún mensaje del bot: el envío nunca salió.
+    expect(h.state.messagesInserts).toHaveLength(0)
+  })
+
+  it('anti-spam: una ráfaga de fallos genera UN solo aviso por conversación', async () => {
+    h.engineSendText.mockRejectedValue(new Error('boom'))
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await dispatchInboundToAiReply(ARGS)
+      await dispatchInboundToAiReply(ARGS)
+      await dispatchInboundToAiReply(ARGS)
+    } finally {
+      errSpy.mockRestore()
+    }
+    expect(h.state.notifications).toHaveLength(1)
   })
 })
 
