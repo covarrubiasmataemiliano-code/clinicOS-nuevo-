@@ -23,7 +23,12 @@ export const maxDuration = 60
  */
 export async function POST(request: Request) {
   const rawBody = await request.text()
-  const signature = request.headers.get('x-zernio-signature')
+  // El servicio de webhooks de Zernio está construido sobre "Late" y firma
+  // con `X-Late-Signature`; algunos tenants usaban `X-Zernio-Signature`.
+  // Aceptamos cualquiera de los dos (HMAC-SHA256 hex del cuerpo crudo).
+  const signature =
+    request.headers.get('x-late-signature') ??
+    request.headers.get('x-zernio-signature')
   const { webhookSecret } = getZernioConfig()
 
   // DEBUG TEMPORAL (Zernio go-live): revela el nombre real del header de
