@@ -37,6 +37,11 @@ import {
 } from '@/lib/whatsapp/phone-utils';
 import type { MessageTemplate } from '@/types';
 import { isMessageTemplate } from '@/lib/whatsapp/template-row-guard';
+import { zernioEnabled } from '@/lib/zernio/config';
+import {
+  zernioSendToConversation,
+  zernioSendMediaToConversation,
+} from '@/lib/zernio/client';
 
 export const MEDIA_KINDS = ['image', 'video', 'document', 'audio'] as const;
 export const VALID_MESSAGE_TYPES = [
@@ -202,6 +207,28 @@ export async function sendMessageToConversation(
   }
 
   const contact = conversation.contact;
+
+  // --- Transporte Zernio -------------------------------------------------
+  // Si esta conversación llegó por Zernio (guardamos su id de inbox en cada
+  // inbound) y Zernio está configurado, el envío sale por la API de inbox
+  // de Zernio — la ÚNICA vía de salida que llega al WhatsApp del cliente en
+  // esta instalación (el plumbing de Meta necesita una WABA real). Las
+  // conversaciones sin id de Zernio caen al camino de Meta de abajo.
+  const zernioConversationId =
+    (conversation as { zernio_conversation_id?: string | null })
+      .zernio_conversation_id ?? null;
+  if (zernioConversationId && zernioEnabled()) {
+    return sendViaZernioConversation(db, accountId, {
+      conversationId,
+      zernioConversationId,
+      contactId: (contact?.id as string | undefined) ?? null,
+      messageType,
+      contentText: contentText ?? null,
+      mediaUrl: mediaUrl ?? null,
+      filename: filename ?? null,
+    });
+  }
+
   if (!contact?.phone) {
     throw new SendMessageError(
       'bad_request',
@@ -422,6 +449,127 @@ export async function sendMessageToConversation(
 
   // Pause any active Flow run for this contact — the agent stepping in
   // is the strongest "yield, human is here" signal. Best-effort.
+  await pauseActiveFlowRun(accountId, contact.id);
+
+  return { messageId: messageRecord.id, whatsappMessageId: waMessageId };
+}
+
+interface ZernioSendArgs {
+  conversationId: string;
+  zernioConversationId: string;
+  contactId: string | null;
+  messageType: string;
+  contentText: string | null;
+  mediaUrl: string | null;
+  filename: string | null;
+}
+
+/**
+ * Envío por la API de inbox de Zernio + persistencia, en paralelo al
+ * camino de Meta de `sendMessageToConversation`. Se usa cuando la
+ * conversación trae un `zernio_conversation_id` (llegó por Zernio).
+ *
+ * Soporta texto y adjuntos (imagen/vídeo/documento/audio). Las plantillas
+ * NO se envían por aquí: WhatsApp sólo las exige para re-abrir la ventana
+ * de 24 h, y el panel manda freeform dentro de una ventana ya abierta por
+ * el mensaje del paciente.
+ */
+async function sendViaZernioConversation(
+  db: SupabaseClient,
+  accountId: string,
+  args: ZernioSendArgs,
+): Promise<SendMessageResult> {
+  const {
+    conversationId,
+    zernioConversationId,
+    contactId,
+    messageType,
+    contentText,
+    mediaUrl,
+    filename,
+  } = args;
+
+  if (messageType === 'template') {
+    throw new SendMessageError(
+      'zernio_template_unsupported',
+      'Las plantillas no se envían desde el panel en modo Zernio. El paciente debe escribir primero para abrir la conversación.',
+      400,
+    );
+  }
+
+  const isMediaKind = (MEDIA_KINDS as readonly string[]).includes(messageType);
+
+  // Envío a Zernio (ya validado por validateSendMessageParams arriba).
+  let zernioMessageId: string;
+  try {
+    if (isMediaKind) {
+      const result = await zernioSendMediaToConversation({
+        conversationId: zernioConversationId,
+        kind: messageType as 'image' | 'video' | 'document' | 'audio',
+        mediaUrl: mediaUrl!,
+        filename: filename ?? undefined,
+        caption: contentText ?? undefined,
+      });
+      zernioMessageId = result.messageId;
+    } else {
+      const result = await zernioSendToConversation({
+        conversationId: zernioConversationId,
+        text: contentText!,
+      });
+      zernioMessageId = result.messageId;
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown Zernio error';
+    console.error('[send-message] Zernio send failed:', message);
+    throw new SendMessageError('zernio_error', `Zernio API error: ${message}`, 502);
+  }
+
+  // Persiste el mensaje enviado (mismo shape que el camino de Meta).
+  const { data: messageRecord, error: msgError } = await db
+    .from('messages')
+    .insert({
+      conversation_id: conversationId,
+      sender_type: 'agent',
+      content_type: messageType,
+      content_text: contentText || null,
+      media_url: mediaUrl || null,
+      message_id: zernioMessageId,
+      status: 'sent',
+    })
+    .select()
+    .single();
+
+  if (msgError) {
+    console.error('[send-message] Zernio: error inserting sent message:', msgError);
+    throw new SendMessageError(
+      'db_error',
+      `Mensaje enviado por Zernio pero no se guardó en la base: ${msgError.message}`,
+      500,
+    );
+  }
+
+  await db
+    .from('conversations')
+    .update({
+      last_message_text: contentText || `[${messageType}]`,
+      last_message_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', conversationId);
+
+  if (contactId) await pauseActiveFlowRun(accountId, contactId);
+
+  return { messageId: messageRecord.id, whatsappMessageId: zernioMessageId };
+}
+
+/**
+ * Pausa cualquier flow activo del contacto — un agente (o el panel)
+ * respondiendo es la señal más fuerte de "cede, hay un humano". Best-effort.
+ */
+async function pauseActiveFlowRun(
+  accountId: string,
+  contactId: string,
+): Promise<void> {
   try {
     const { error: pauseErr } = await supabaseAdmin()
       .from('flow_runs')
@@ -431,7 +579,7 @@ export async function sendMessageToConversation(
         end_reason: 'agent_replied',
       })
       .eq('account_id', accountId)
-      .eq('contact_id', contact.id)
+      .eq('contact_id', contactId)
       .eq('status', 'active');
     if (pauseErr) {
       console.error('[flows] pause-on-agent-send failed:', pauseErr.message);
@@ -439,9 +587,7 @@ export async function sendMessageToConversation(
   } catch (err) {
     console.error(
       '[flows] pause-on-agent-send threw:',
-      err instanceof Error ? err.message : err
+      err instanceof Error ? err.message : err,
     );
   }
-
-  return { messageId: messageRecord.id, whatsappMessageId: waMessageId };
 }

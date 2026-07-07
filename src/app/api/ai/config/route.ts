@@ -147,6 +147,7 @@ export async function POST(request: Request) {
           autoReplyEnabled,
           autoReplyMaxPerConversation: maxPer,
           embeddingsApiKey: null,
+          clinicalAgentEnabled: false,
         })
       } catch (err) {
         if (err instanceof AiError) {

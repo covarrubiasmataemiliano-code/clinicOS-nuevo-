@@ -5,7 +5,13 @@ import { retrieveKnowledge } from './knowledge'
 import { generateReply } from './generate'
 import { buildSystemPrompt } from './defaults'
 import { latestUserMessage } from './query'
+import {
+  runClinicalAgent,
+  buildClinicalSystemPrompt,
+  clinicTimezone,
+} from './agent'
 import { engineSendText } from '@/lib/flows/meta-send'
+import { zernioSendToConversation } from '@/lib/zernio/client'
 
 interface DispatchArgs {
   /** Tenancy key — drives config, contact, and whatsapp_config lookups. */
@@ -15,6 +21,11 @@ interface DispatchArgs {
   /** The account's WhatsApp config owner, used for the outbound send's
    *  audit columns (mirrors how the flow runner passes it through). */
   configOwnerUserId: string
+  /** Zernio inbox conversation id, when the inbound arrived via Zernio.
+   *  Present → the reply is sent back into that Zernio conversation
+   *  (freeform inbox send) instead of the phone-based Meta/engine path,
+   *  which Zernio's API does not support for WhatsApp. */
+  zernioConversationId?: string | null
 }
 
 /**
@@ -40,6 +51,7 @@ export async function dispatchInboundToAiReply(
   args: DispatchArgs,
 ): Promise<void> {
   const { accountId, conversationId, contactId, configOwnerUserId } = args
+  const zernioConversationId = args.zernioConversationId ?? null
 
   try {
     const db = supabaseAdmin()
@@ -79,25 +91,68 @@ export async function dispatchInboundToAiReply(
     const messages = await buildConversationContext(db, conversationId)
     if (messages.length === 0) return
 
-    // Ground the reply in the account's knowledge base (best-effort).
-    const knowledge = await retrieveKnowledge(
-      db,
-      accountId,
-      config,
-      latestUserMessage(messages),
-    )
+    let text: string
+    let handoff: boolean
 
-    const systemPrompt = buildSystemPrompt({
-      userPrompt: config.systemPrompt,
-      mode: 'auto_reply',
-      knowledge,
-    })
+    if (config.clinicalAgentEnabled) {
+      // clinicOS: agente de Atención con herramientas clínicas (catálogo,
+      // agenda, anticipos) en vez de una sola completación. Corre con
+      // Anthropic u OpenAI (tool-calling). Se apoya en las tools para los
+      // hechos, así que no consulta la KB semántica.
+      const { data: contact } = await db
+        .from('contacts')
+        .select('name')
+        .eq('id', contactId)
+        .maybeSingle()
+      const contactName = (contact?.name as string | null) ?? null
+      const timezone = clinicTimezone()
+      const now = new Date()
 
-    const { text, handoff } = await generateReply({
-      config,
-      systemPrompt,
-      messages,
-    })
+      const systemPrompt = buildClinicalSystemPrompt({
+        userPrompt: config.systemPrompt,
+        contactName,
+        timezone,
+        now,
+      })
+
+      const result = await runClinicalAgent({
+        provider: config.provider,
+        apiKey: config.apiKey,
+        model: config.model,
+        systemPrompt,
+        messages,
+        ctx: {
+          db,
+          accountId,
+          contactId,
+          conversationId,
+          userId: configOwnerUserId,
+          contactName,
+          timezone,
+          now,
+        },
+      })
+      text = result.text
+      handoff = result.handoff
+    } else {
+      // Ground the reply in the account's knowledge base (best-effort).
+      const knowledge = await retrieveKnowledge(
+        db,
+        accountId,
+        config,
+        latestUserMessage(messages),
+      )
+
+      const systemPrompt = buildSystemPrompt({
+        userPrompt: config.systemPrompt,
+        mode: 'auto_reply',
+        knowledge,
+      })
+
+      const gen = await generateReply({ config, systemPrompt, messages })
+      text = gen.text
+      handoff = gen.handoff
+    }
 
     if (handoff || !text) {
       // The model can't (or shouldn't) answer — stop auto-replying on
@@ -124,13 +179,43 @@ export async function dispatchInboundToAiReply(
     )
     if (claimErr || claimed !== true) return
 
-    await engineSendText({
-      accountId,
-      userId: configOwnerUserId,
-      conversationId,
-      contactId,
-      text,
-    })
+    if (zernioConversationId) {
+      // Vino por Zernio: responde en la MISMA conversación de inbox
+      // (texto libre dentro de la ventana de 24h) y persiste el mensaje
+      // del bot nosotros mismos — engineSendText es por-teléfono y la
+      // API de Zernio no acepta ese modo para WhatsApp.
+      const { messageId } = await zernioSendToConversation({
+        conversationId: zernioConversationId,
+        text,
+      })
+      const { error: msgErr } = await db.from('messages').insert({
+        conversation_id: conversationId,
+        sender_type: 'bot',
+        content_type: 'text',
+        content_text: text,
+        message_id: messageId,
+        status: 'sent',
+      })
+      if (msgErr) {
+        console.error('[ai auto-reply] zernio reply sent but DB insert failed:', msgErr)
+      }
+      await db
+        .from('conversations')
+        .update({
+          last_message_text: text,
+          last_message_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', conversationId)
+    } else {
+      await engineSendText({
+        accountId,
+        userId: configOwnerUserId,
+        conversationId,
+        contactId,
+        text,
+      })
+    }
   } catch (err) {
     console.error('[ai auto-reply] dispatch failed:', err)
   }

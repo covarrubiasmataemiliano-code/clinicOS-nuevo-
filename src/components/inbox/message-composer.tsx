@@ -9,7 +9,6 @@ import {
 } from "react";
 import {
   Send,
-  LayoutTemplate,
   Paperclip,
   Image as ImageIcon,
   Video,
@@ -18,7 +17,6 @@ import {
   Square,
   X,
   Loader2,
-  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { GatedButton } from "@/components/ui/gated-button";
@@ -71,15 +69,14 @@ interface ReplyDraft {
   preview: string;
 }
 
-// Mirrors the chat-media bucket's allowed_mime_types (migration 023) for
-// the file picker so unsupported files are rejected before upload rather
-// than failing with a confusing Storage error. Audio has no picker — it's
-// captured via the recorder.
+// Picker filters. Images/vídeo se acotan a los tipos que Meta acepta
+// (validación temprana antes de subir). Los documentos aceptan CUALQUIER
+// archivo (PDF, zip, etc.): el bucket `chat-media` ya no restringe MIME
+// (migración 033) y WhatsApp aplica su propia validación al enviar.
 const PICKER_ACCEPT: Record<"image" | "video" | "document", string> = {
   image: "image/png,image/jpeg,image/webp",
   video: "video/mp4,video/3gpp",
-  document:
-    "application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/plain",
+  document: "*",
 };
 
 interface MediaDraft {
@@ -92,11 +89,9 @@ interface MediaDraft {
 }
 
 interface MessageComposerProps {
-  conversationId: string;
   sessionExpired: boolean;
   onSend: (text: string, replyToId?: string) => void;
   onSendMedia: (payload: SendMediaPayload) => void;
-  onOpenTemplates: () => void;
   replyTo?: ReplyDraft | null;
   onClearReply?: () => void;
 }
@@ -113,17 +108,14 @@ function formatDuration(seconds: number): string {
 const OPUS_ENCODER_PATH = "/opus/encoderWorker.min.js";
 
 export function MessageComposer({
-  conversationId,
   sessionExpired,
   onSend,
   onSendMedia,
-  onOpenTemplates,
   replyTo,
   onClearReply,
 }: MessageComposerProps) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
-  const [drafting, setDrafting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Media attachment state. `draft` holds an uploaded-but-not-yet-sent
@@ -224,50 +216,6 @@ export function MessageComposer({
     },
     [adjustHeight]
   );
-
-  // Ask the AI assistant for a suggested reply and drop it into the
-  // composer for the agent to edit + send. Read-only server-side —
-  // nothing is sent until the agent hits Send.
-  const handleDraft = useCallback(async () => {
-    if (drafting) return;
-    setDrafting(true);
-    try {
-      const res = await fetch("/api/ai/draft", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversation_id: conversationId }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        if (data.code === "ai_not_configured") {
-          toast.error("AI isn't set up yet — enable it in Settings → AI Assistant.");
-        } else {
-          toast.error(data.error ?? "Couldn't draft a reply.");
-        }
-        return;
-      }
-      const draftText = typeof data.draft === "string" ? data.draft.trim() : "";
-      if (!draftText) {
-        toast.error("The assistant didn't return a reply.");
-        return;
-      }
-      setText(draftText);
-      // Let the textarea grow to fit and drop the cursor at the end so
-      // the agent can tweak immediately.
-      requestAnimationFrame(() => {
-        adjustHeight();
-        const el = textareaRef.current;
-        if (el) {
-          el.focus();
-          el.setSelectionRange(el.value.length, el.value.length);
-        }
-      });
-    } catch {
-      toast.error("Couldn't reach the AI assistant.");
-    } finally {
-      setDrafting(false);
-    }
-  }, [drafting, conversationId, adjustHeight]);
 
   // Upload a captured file to chat-media and stage it as a draft.
   const stageUpload = useCallback(
@@ -435,19 +383,11 @@ export function MessageComposer({
         </div>
       )}
       {sessionExpired && (
-        <div className="mb-2 flex items-center justify-between rounded-lg bg-amber-500/10 px-3 py-2">
+        <div className="mb-2 rounded-lg bg-amber-500/10 px-3 py-2">
           <p className="text-xs text-amber-400">
-            24-hour session expired. Use a template to re-engage.
+            La ventana de 24 h de WhatsApp se cerró. El cliente debe volver a
+            escribir para poder responderle.
           </p>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 text-xs text-amber-400 hover:text-amber-300"
-            onClick={onOpenTemplates}
-          >
-            <LayoutTemplate className="mr-1 h-3 w-3" />
-            Templates
-          </Button>
         </div>
       )}
 
@@ -557,35 +497,6 @@ export function MessageComposer({
             </DropdownMenuContent>
           </DropdownMenu>
 
-          <GatedButton
-            variant="ghost"
-            size="sm"
-            canAct={!readOnly}
-            gateReason="send messages"
-            title={readOnly ? undefined : "Send template"}
-            className="h-9 w-9 shrink-0 p-0 text-muted-foreground hover:text-foreground"
-            onClick={onOpenTemplates}
-          >
-            <LayoutTemplate className="h-4 w-4" />
-          </GatedButton>
-
-          <GatedButton
-            variant="ghost"
-            size="sm"
-            canAct={!readOnly}
-            gateReason="send messages"
-            disabled={drafting}
-            title={readOnly ? undefined : "Draft a reply with AI"}
-            className="h-9 w-9 shrink-0 p-0 text-muted-foreground hover:text-primary"
-            onClick={handleDraft}
-          >
-            {drafting ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Sparkles className="h-4 w-4" />
-            )}
-          </GatedButton>
-
           <textarea
             ref={textareaRef}
             value={text}
@@ -593,10 +504,10 @@ export function MessageComposer({
             onKeyDown={handleKeyDown}
             placeholder={
               readOnly
-                ? "Read-only — viewers can browse but not reply"
+                ? "Sólo lectura — no puedes responder"
                 : sessionExpired
-                  ? "Session expired - use a template"
-                  : "Type a message... (Shift+Enter for new line)"
+                  ? "Ventana de 24 h cerrada — espera a que el cliente escriba"
+                  : "Escribe un mensaje… (Shift+Enter para salto de línea)"
             }
             disabled={sessionExpired || readOnly}
             rows={1}
@@ -621,15 +532,6 @@ export function MessageComposer({
             <Send className="h-4 w-4" />
           </GatedButton>
         </div>
-      )}
-
-      {/* Hint sits outside the flex row so its height doesn't push
-          `items-end` buttons below the textarea. Indented to line up
-          under the textarea left edge. */}
-      {!draft && !recording && (
-        <p className="mt-1 pl-[5.5rem] text-[10px] text-muted-foreground">
-          Tap the ✨ to draft a reply with AI — you can edit it before sending
-        </p>
       )}
     </div>
   );

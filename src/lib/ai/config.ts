@@ -11,10 +11,11 @@ interface AiConfigRow {
   auto_reply_enabled: boolean
   auto_reply_max_per_conversation: number
   embeddings_api_key: string | null
+  clinical_agent_enabled: boolean
 }
 
 const CONFIG_COLUMNS =
-  'provider, model, api_key, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, embeddings_api_key'
+  'provider, model, api_key, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, embeddings_api_key, clinical_agent_enabled'
 
 /**
  * Load and decrypt the account's AI config for *use* (draft or
@@ -77,6 +78,9 @@ export async function loadAiConfig(
     autoReplyEnabled: row.auto_reply_enabled,
     autoReplyMaxPerConversation: row.auto_reply_max_per_conversation,
     embeddingsApiKey,
+    // Defensive default: a row written before migration 032 (or by an
+    // older client) may not carry the column — treat missing as off.
+    clinicalAgentEnabled: row.clinical_agent_enabled ?? false,
   }
 }
 

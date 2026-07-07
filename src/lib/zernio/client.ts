@@ -129,6 +129,163 @@ export async function zernioSendText(args: ZernioSendTextArgs): Promise<ZernioSe
   })
 }
 
+export interface ZernioReplyArgs {
+  /** Zernio's inbox conversation id (viene en el webhook entrante). */
+  conversationId: string
+  text: string
+}
+
+/**
+ * Responde con texto libre DENTRO de una conversación de inbox de Zernio.
+ *
+ * Este es el camino correcto para contestar un WhatsApp entrante:
+ *
+ *   POST {base}/v1/inbox/conversations/{conversationId}/messages
+ *   { accountId, message }
+ *
+ * WhatsApp solo permite mensajes libres dentro de la ventana de 24h, que
+ * el mensaje entrante del paciente acaba de abrir — por eso respondemos
+ * a la conversación existente y no "iniciamos" (iniciar exige plantilla,
+ * vía POST /v1/inbox/conversations; fuera del alcance del auto-reply).
+ */
+export async function zernioSendToConversation(
+  args: ZernioReplyArgs,
+): Promise<ZernioSendResult> {
+  if (!args.text) throw new Error('zernioSendToConversation requires text.')
+  if (!args.conversationId) {
+    throw new Error('zernioSendToConversation requires a conversationId.')
+  }
+  const cfg = getZernioConfig()
+
+  if (!cfg.apiKey && cfg.dryRun) {
+    const messageId = `zernio-dry-run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    console.log(
+      '[zernio] DRY RUN — reply skipped:',
+      args.conversationId,
+      JSON.stringify(args.text.slice(0, 80)),
+      '→',
+      messageId,
+    )
+    return { messageId }
+  }
+  if (!cfg.apiKey || !cfg.accountId) {
+    throw new Error(
+      'Zernio is not configured: set ZERNIO_API_KEY and ZERNIO_ACCOUNT_ID (or ZERNIO_DRY_RUN=true for local development).',
+    )
+  }
+
+  const url = `${cfg.baseUrl}/v1/inbox/conversations/${encodeURIComponent(
+    args.conversationId,
+  )}/messages`
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${cfg.apiKey}`,
+    },
+    body: JSON.stringify({ accountId: cfg.accountId, message: args.text }),
+  })
+  if (!response.ok) {
+    await throwZernioError(response, `Zernio API error: ${response.status}`)
+  }
+  const data = await response.json().catch(() => null)
+  // El envío ya ocurrió; si no logramos parsear un id, usamos uno
+  // sintético en vez de fallar (el mensaje sí salió).
+  const messageId = extractZernioMessageId(data) ?? `zernio-sent-${Date.now()}`
+  return { messageId }
+}
+
+export interface ZernioReplyMediaArgs {
+  /** Zernio's inbox conversation id (viene en el webhook entrante). */
+  conversationId: string
+  /** Tipo de media wacrm: se mapea al `attachmentType` de Zernio. */
+  kind: 'image' | 'video' | 'document' | 'audio'
+  /** URL pública que Zernio (→ Meta) descarga al enviar. */
+  mediaUrl: string
+  /** Nombre visible del documento (WhatsApp lo muestra al receptor). */
+  filename?: string
+  /** Pie de foto/vídeo (Meta no acepta caption en audio). */
+  caption?: string
+}
+
+/** wacrm content_type → Zernio `attachmentType` del endpoint de inbox. */
+function toZernioAttachmentType(
+  kind: ZernioReplyMediaArgs['kind'],
+): 'image' | 'video' | 'audio' | 'file' {
+  return kind === 'document' ? 'file' : kind
+}
+
+/**
+ * Envía un ADJUNTO (imagen, vídeo, documento, nota de voz) dentro de una
+ * conversación de inbox de Zernio, por URL pública:
+ *
+ *   POST {base}/v1/inbox/conversations/{conversationId}/messages
+ *   { accountId, message?, attachmentUrl, attachmentType, attachmentName?, voiceNote? }
+ *
+ * El archivo ya vive en el bucket público `chat-media` (Supabase Storage),
+ * así que pasamos su URL — no hace falta multipart. Los audios se marcan
+ * `voiceNote: true`: el composer graba Ogg/Opus mono, justo lo que WhatsApp
+ * exige para una nota de voz (PTT con forma de onda).
+ */
+export async function zernioSendMediaToConversation(
+  args: ZernioReplyMediaArgs,
+): Promise<ZernioSendResult> {
+  if (!args.conversationId) {
+    throw new Error('zernioSendMediaToConversation requires a conversationId.')
+  }
+  if (!args.mediaUrl) {
+    throw new Error('zernioSendMediaToConversation requires a mediaUrl.')
+  }
+  const cfg = getZernioConfig()
+  const attachmentType = toZernioAttachmentType(args.kind)
+
+  if (!cfg.apiKey && cfg.dryRun) {
+    const messageId = `zernio-dry-run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    console.log(
+      '[zernio] DRY RUN — media reply skipped:',
+      args.conversationId,
+      attachmentType,
+      args.mediaUrl,
+      '→',
+      messageId,
+    )
+    return { messageId }
+  }
+  if (!cfg.apiKey || !cfg.accountId) {
+    throw new Error(
+      'Zernio is not configured: set ZERNIO_API_KEY and ZERNIO_ACCOUNT_ID (or ZERNIO_DRY_RUN=true for local development).',
+    )
+  }
+
+  const body: Record<string, unknown> = {
+    accountId: cfg.accountId,
+    attachmentUrl: args.mediaUrl,
+    attachmentType,
+  }
+  // Meta rechaza caption en audio; el resto lleva el texto tal cual.
+  if (args.caption && args.kind !== 'audio') body.message = args.caption
+  if (args.kind === 'document' && args.filename) body.attachmentName = args.filename
+  if (args.kind === 'audio') body.voiceNote = true
+
+  const url = `${cfg.baseUrl}/v1/inbox/conversations/${encodeURIComponent(
+    args.conversationId,
+  )}/messages`
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${cfg.apiKey}`,
+    },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    await throwZernioError(response, `Zernio API error: ${response.status}`)
+  }
+  const data = await response.json().catch(() => null)
+  const messageId = extractZernioMessageId(data) ?? `zernio-sent-${Date.now()}`
+  return { messageId }
+}
+
 export type ZernioMediaType = 'image' | 'video' | 'document' | 'audio'
 
 export interface ZernioSendMediaArgs {

@@ -13,7 +13,6 @@ import type {
   MessageReaction,
   Contact,
   ConversationStatus,
-  MessageTemplate,
   Profile,
 } from "@/types";
 import {
@@ -26,6 +25,13 @@ import {
   RefreshCw,
   PanelRightOpen,
   PanelRightClose,
+  Bot,
+  Hand,
+  MoreVertical,
+  Download,
+  Eraser,
+  Trash2,
+  AlertTriangle,
 } from "lucide-react";
 import { format, isToday, isYesterday, differenceInHours } from "date-fns";
 import { Badge } from "@/components/ui/badge";
@@ -36,7 +42,15 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { MessageBubble } from "./message-bubble";
 import { MessageActions } from "./message-actions";
 import {
@@ -45,7 +59,6 @@ import {
   type SendMediaPayload,
 } from "./message-composer";
 import { deleteAccountMedia } from "@/lib/storage/upload-media";
-import { TemplatePicker } from "./template-picker";
 import { buildReplyPreview } from "./reply-quote";
 import { toast } from "sonner";
 
@@ -53,13 +66,6 @@ interface ReplyDraft {
   id: string;
   authorLabel: string;
   preview: string;
-}
-
-function renderTemplateBody(body: string, params: string[]): string {
-  return body.replace(/\{\{(\d+)\}\}/g, (_, raw) => {
-    const idx = Number(raw) - 1;
-    return params[idx] ?? `{{${raw}}}`;
-  });
 }
 
 interface MessageThreadProps {
@@ -106,6 +112,15 @@ interface MessageThreadProps {
    */
   contactPanelOpen?: boolean;
   onToggleContactPanel?: () => void;
+  /**
+   * El agente cambió el modo IA↔humano de este hilo. La página refleja
+   * `ai_autoreply_disabled` en su estado (lista + conversación activa).
+   */
+  onAiModeChange?: (conversationId: string, aiDisabled: boolean) => void;
+  /** Se limpiaron los mensajes del hilo (se conserva la conversación). */
+  onCleared?: (conversationId: string) => void;
+  /** Se eliminó la conversación por completo. */
+  onDeleted?: (conversationId: string) => void;
 }
 
 function formatDateSeparator(dateStr: string): string {
@@ -164,14 +179,25 @@ export function MessageThread({
   onRefresh,
   contactPanelOpen,
   onToggleContactPanel,
+  onAiModeChange,
+  onCleared,
+  onDeleted,
 }: MessageThreadProps) {
   const { user } = useAuth();
   const { getPresence, getRow, now } = usePresence();
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [reactions, setReactions] = useState<MessageReaction[]>([]);
+  // Diálogos de confirmación destructiva + estado de las acciones del hilo.
+  const [confirmAction, setConfirmAction] = useState<"clear" | "delete" | null>(
+    null,
+  );
+  const [actionBusy, setActionBusy] = useState(false);
+  // Optimista: refleja el interruptor IA↔humano sin esperar el round-trip.
+  const [aiDisabled, setAiDisabled] = useState(
+    conversation?.ai_autoreply_disabled ?? false,
+  );
   // Purely visual spin state for the manual-refresh button. The actual
   // refetch is fire-and-forget through `onRefresh` (which bumps the
   // parent's resyncToken); the 700ms spin is just feedback so the click
@@ -409,6 +435,12 @@ export function MessageThread({
     setReplyTo(null);
   }, [conversationId]);
 
+  // Sincroniza el interruptor IA↔humano con el valor del servidor cuando
+  // se cambia de hilo o cuando el padre propaga un cambio (realtime).
+  useEffect(() => {
+    setAiDisabled(conversation?.ai_autoreply_disabled ?? false);
+  }, [conversationId, conversation?.ai_autoreply_disabled]);
+
   // Reset the server-side unread_count to 0 whenever an unread count
   // surfaces on the active conversation — covers both (a) opening a
   // conversation that had unread messages and (b) new messages arriving
@@ -576,79 +608,133 @@ export function MessageThread({
     [conversation, onStatusChange]
   );
 
-  const handleOpenTemplates = useCallback(() => {
-    setTemplateModalOpen(true);
-  }, []);
+  // --- Modo IA ↔ humano ------------------------------------------------
+  // Interruptor para tomar el control del hilo. `ai_autoreply_disabled=true`
+  // hace que el auto-reply se detenga (src/lib/ai/auto-reply.ts). Update
+  // optimista + persistencia por RLS (misma vía que status/assign).
+  const handleToggleAiMode = useCallback(async () => {
+    if (!conversation) return;
+    const next = !aiDisabled; // true = modo humano (IA en pausa)
+    setAiDisabled(next);
+    onAiModeChange?.(conversation.id, next);
 
-  const handleSendTemplate = useCallback(
-    async (
-      template: MessageTemplate,
-      values: {
-        body: string[];
-        headerText?: string;
-        buttonParams?: Record<number, string>;
+    const supabase = createClient();
+    const { error } = await supabase
+      .from("conversations")
+      .update({ ai_autoreply_disabled: next })
+      .eq("id", conversation.id);
+
+    if (error) {
+      console.error("Failed to toggle AI mode:", error);
+      toast.error("No se pudo cambiar el modo. Intenta de nuevo.");
+      setAiDisabled(!next); // rollback
+      onAiModeChange?.(conversation.id, !next);
+      return;
+    }
+    toast.success(
+      next
+        ? "Modo humano: tú tienes el control de esta conversación."
+        : "Modo IA: el asistente vuelve a responder automáticamente.",
+    );
+  }, [conversation, aiDisabled, onAiModeChange]);
+
+  // --- Descargar conversación en JSON ----------------------------------
+  const handleDownloadJson = useCallback(() => {
+    if (!conversation || !contact) return;
+    const payload = {
+      exported_at: new Date().toISOString(),
+      conversation: {
+        id: conversation.id,
+        status: conversation.status,
+        created_at: conversation.created_at,
+        updated_at: conversation.updated_at,
+        ai_autoreply_disabled: conversation.ai_autoreply_disabled ?? false,
       },
-    ) => {
-      if (!conversation) return;
+      contact: {
+        id: contact.id,
+        name: contact.name ?? null,
+        phone: contact.phone ?? null,
+      },
+      message_count: messages.length,
+      messages: messages.map((m) => ({
+        id: m.id,
+        sender_type: m.sender_type,
+        content_type: m.content_type,
+        content_text: m.content_text ?? null,
+        media_url: m.media_url ?? null,
+        status: m.status ?? null,
+        created_at: m.created_at,
+      })),
+    };
+    try {
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const safeName = (contact.name || contact.phone || "conversacion")
+        .replace(/[^a-zA-Z0-9_-]+/g, "_")
+        .slice(0, 40);
+      const stamp = new Date().toISOString().slice(0, 10);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `conversacion-${safeName}-${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to export conversation:", err);
+      toast.error("No se pudo descargar la conversación.");
+    }
+  }, [conversation, contact, messages]);
 
-      const renderedBody = renderTemplateBody(template.body_text, values.body);
-      const tempId = `temp-${Date.now()}`;
-
-      const optimisticMsg: Message = {
-        id: tempId,
-        conversation_id: conversation.id,
-        sender_type: "agent",
-        content_type: "template",
-        content_text: renderedBody,
-        template_name: template.name,
-        status: "sending",
-        created_at: new Date().toISOString(),
-      };
-      onNewMessage(optimisticMsg);
-
-      try {
-        const res = await fetch("/api/whatsapp/send", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            conversation_id: conversation.id,
-            message_type: "template",
-            template_name: template.name,
-            template_language: template.language,
-            // Structured params drive the new send-builder path
-            // (header media + URL button substitution). Body values
-            // are mirrored under both shapes so the route can fall
-            // back if the template row isn't found locally.
-            template_message_params: {
-              body: values.body,
-              headerText: values.headerText,
-              buttonParams: values.buttonParams,
-            },
-            template_params: values.body,
-            content_text: renderedBody,
-          }),
-        });
-
-        const payload = await res.json().catch(() => ({}));
-
-        if (!res.ok) {
-          const reason = payload?.error || `HTTP ${res.status}`;
-          console.error("Failed to send template:", reason);
-          toast.error(`Failed to send template: ${reason}`);
-          onUpdateMessage(tempId, { status: "failed" });
-          return;
-        }
-
-        onUpdateMessage(tempId, { status: "sent" });
-      } catch (err) {
-        console.error("Failed to send template:", err);
-        const reason = err instanceof Error ? err.message : "network error";
-        toast.error(`Failed to send template: ${reason}`);
-        onUpdateMessage(tempId, { status: "failed" });
+  // --- Limpiar / Eliminar (destructivas, confirmadas por diálogo) ------
+  const handleConfirmClear = useCallback(async () => {
+    if (!conversation || actionBusy) return;
+    setActionBusy(true);
+    try {
+      const res = await fetch(
+        `/api/inbox/conversations/${conversation.id}/clear`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.error || `HTTP ${res.status}`);
       }
-    },
-    [conversation, onNewMessage, onUpdateMessage],
-  );
+      onMessagesLoaded([]); // vacía el hilo abierto
+      onCleared?.(conversation.id);
+      setConfirmAction(null);
+      toast.success("Conversación limpiada.");
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "error de red";
+      toast.error(`No se pudo limpiar: ${reason}`);
+    } finally {
+      setActionBusy(false);
+    }
+  }, [conversation, actionBusy, onMessagesLoaded, onCleared]);
+
+  const handleConfirmDelete = useCallback(async () => {
+    if (!conversation || actionBusy) return;
+    setActionBusy(true);
+    try {
+      const res = await fetch(`/api/inbox/conversations/${conversation.id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      const deletedId = conversation.id;
+      setConfirmAction(null);
+      toast.success("Conversación eliminada permanentemente.");
+      onDeleted?.(deletedId);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "error de red";
+      toast.error(`No se pudo eliminar: ${reason}`);
+    } finally {
+      setActionBusy(false);
+    }
+  }, [conversation, actionBusy, onDeleted]);
 
   // Build a quick id → Message map so reply quotes can be rendered without
   // an extra fetch — the thread already holds the full conversation.
@@ -905,6 +991,34 @@ export function MessageThread({
             </button>
           )}
 
+          {/* Interruptor Modo IA ↔ Modo humano. Verde = la IA responde
+              sola; ámbar = tú tomaste el control (la IA se detiene). */}
+          <button
+            type="button"
+            onClick={handleToggleAiMode}
+            aria-pressed={!aiDisabled}
+            title={
+              aiDisabled
+                ? "Modo humano — toca para devolver el control a la IA"
+                : "Modo IA — toca para tomar el control tú"
+            }
+            className={cn(
+              "inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition-colors",
+              aiDisabled
+                ? "bg-amber-500/15 text-amber-400 hover:bg-amber-500/25"
+                : "bg-primary/15 text-primary hover:bg-primary/25",
+            )}
+          >
+            {aiDisabled ? (
+              <Hand className="h-3.5 w-3.5" />
+            ) : (
+              <Bot className="h-3.5 w-3.5" />
+            )}
+            <span className="hidden sm:inline">
+              {aiDisabled ? "Humano" : "IA"}
+            </span>
+          </button>
+
           {/* Status dropdown */}
           <DropdownMenu>
             <DropdownMenuTrigger className={cn(
@@ -994,6 +1108,38 @@ export function MessageThread({
               )}
             </DropdownMenuContent>
           </DropdownMenu>
+
+          {/* Menú de acciones del hilo: exportar / limpiar / eliminar. */}
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              aria-label="Más acciones"
+              title="Más acciones"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <MoreVertical className="h-4 w-4" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="border-border bg-popover">
+              <DropdownMenuItem onClick={handleDownloadJson} className="text-sm">
+                <Download className="mr-2 h-4 w-4" />
+                Descargar JSON
+              </DropdownMenuItem>
+              <DropdownMenuSeparator className="bg-border" />
+              <DropdownMenuItem
+                onClick={() => setConfirmAction("clear")}
+                className="text-sm text-amber-400 focus:text-amber-400"
+              >
+                <Eraser className="mr-2 h-4 w-4" />
+                Limpiar conversación
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => setConfirmAction("delete")}
+                className="text-sm text-red-400 focus:text-red-400"
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                Eliminar conversación
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 
@@ -1005,9 +1151,9 @@ export function MessageThread({
           </div>
         ) : messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-12">
-            <p className="text-sm text-muted-foreground">No messages yet</p>
+            <p className="text-sm text-muted-foreground">Sin mensajes aún</p>
             <p className="text-xs text-muted-foreground">
-              Send a template to start the conversation
+              Los mensajes de esta conversación aparecerán aquí
             </p>
           </div>
         ) : (
@@ -1072,20 +1218,87 @@ export function MessageThread({
 
       {/* Composer */}
       <MessageComposer
-        conversationId={conversation.id}
         sessionExpired={sessionInfo.expired}
         onSend={handleSend}
         onSendMedia={handleSendMedia}
-        onOpenTemplates={handleOpenTemplates}
         replyTo={replyTo}
         onClearReply={() => setReplyTo(null)}
       />
 
-      <TemplatePicker
-        open={templateModalOpen}
-        onOpenChange={setTemplateModalOpen}
-        onSelect={handleSendTemplate}
-      />
+      {/* Confirmación de acciones destructivas (limpiar / eliminar). */}
+      <Dialog
+        open={confirmAction !== null}
+        onOpenChange={(open) => {
+          if (!open && !actionBusy) setConfirmAction(null);
+        }}
+      >
+        <DialogContent className="border-border bg-card">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle
+                className={cn(
+                  "h-5 w-5",
+                  confirmAction === "delete" ? "text-red-400" : "text-amber-400",
+                )}
+              />
+              {confirmAction === "delete"
+                ? "Eliminar conversación"
+                : "Limpiar conversación"}
+            </DialogTitle>
+            <DialogDescription className="pt-2 text-sm text-muted-foreground">
+              {confirmAction === "delete" ? (
+                <>
+                  Esto borrará <strong>permanentemente</strong> la conversación
+                  con <strong>{contactDisplayName}</strong> y{" "}
+                  <strong>todos sus mensajes</strong> de la base de datos. Esta
+                  acción <strong>no se puede deshacer</strong>.
+                </>
+              ) : (
+                <>
+                  Esto borrará <strong>permanentemente todos los mensajes</strong>{" "}
+                  de esta conversación de la base de datos (el contacto y el hilo
+                  se conservan). Esta acción{" "}
+                  <strong>no se puede deshacer</strong>.
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setConfirmAction(null)}
+              disabled={actionBusy}
+            >
+              Cancelar
+            </Button>
+            <Button
+              onClick={
+                confirmAction === "delete"
+                  ? handleConfirmDelete
+                  : handleConfirmClear
+              }
+              disabled={actionBusy}
+              className={cn(
+                "text-white",
+                confirmAction === "delete"
+                  ? "bg-red-600 hover:bg-red-700"
+                  : "bg-amber-600 hover:bg-amber-700",
+              )}
+            >
+              {actionBusy ? (
+                <span className="inline-flex items-center gap-2">
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                  Procesando…
+                </span>
+              ) : confirmAction === "delete" ? (
+                "Eliminar permanentemente"
+              ) : (
+                "Limpiar mensajes"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

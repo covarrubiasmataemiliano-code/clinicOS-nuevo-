@@ -41,6 +41,7 @@ describe('mapZernioInbound — text messages', () => {
       contentText: 'Hola, quiero una cita',
       mediaUrl: null,
       createdAtIso: '2026-07-06T10:15:30.000Z',
+      zernioConversationId: 'zc_1',
     })
   })
 

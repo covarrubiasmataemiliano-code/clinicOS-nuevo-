@@ -25,6 +25,11 @@ export interface AiConfig {
    *  knowledge base is embedded and semantic retrieval turns on; when
    *  null, retrieval falls back to lexical full-text search. */
   embeddingsApiKey: string | null
+  /** clinicOS (migration 032): when true and `provider === 'anthropic'`,
+   *  the inbound auto-reply runs the clinical Attention agent (tool-use
+   *  loop over the scheduling tables) instead of a single text
+   *  completion. Ignored for OpenAI / non-clinic accounts. */
+  clinicalAgentEnabled: boolean
 }
 
 /** A single conversation turn in the shape both providers accept. */

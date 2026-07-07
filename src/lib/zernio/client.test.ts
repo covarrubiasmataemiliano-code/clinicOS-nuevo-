@@ -3,8 +3,10 @@ import {
   extractZernioMessageId,
   toZernioPhone,
   zernioSendMedia,
+  zernioSendMediaToConversation,
   zernioSendTemplate,
   zernioSendText,
+  zernioSendToConversation,
 } from './client'
 
 // The base URL is NEVER assumed in these tests (it isn't confirmed in
@@ -182,6 +184,107 @@ describe('zernioSendTemplate', () => {
       name: 'hola',
       language: 'es_MX',
     })
+  })
+})
+
+describe('zernioSendToConversation — respuesta de texto en inbox', () => {
+  it('POSTs to /v1/inbox/conversations/{id}/messages with { accountId, message }', async () => {
+    const fetchSpy = stubFetchOk({ message: { platformMessageId: 'wamid.R1' } })
+
+    const result = await zernioSendToConversation({
+      conversationId: 'zc_abc',
+      text: 'Hola, con gusto te agendo',
+    })
+
+    const cap = fetchSpy.captured()
+    expect(cap.url).toBe(`${BASE}/v1/inbox/conversations/zc_abc/messages`)
+    expect(cap.method).toBe('POST')
+    expect(cap.headers.Authorization).toBe('Bearer zk_test_123')
+    expect(cap.body).toEqual({ accountId: 'acc_42', message: 'Hola, con gusto te agendo' })
+    expect(result).toEqual({ messageId: 'wamid.R1' })
+  })
+
+  it('falls back to a synthetic id when Zernio returns no id (the send happened)', async () => {
+    stubFetchOk({ ok: true })
+    const result = await zernioSendToConversation({ conversationId: 'zc_1', text: 'x' })
+    expect(result.messageId).toMatch(/^zernio-sent-/)
+  })
+
+  it('requires text + conversationId before any network call', async () => {
+    vi.stubGlobal('fetch', vi.fn())
+    await expect(
+      zernioSendToConversation({ conversationId: 'zc_1', text: '' }),
+    ).rejects.toThrow(/requires text/)
+    await expect(
+      zernioSendToConversation({ conversationId: '', text: 'hi' }),
+    ).rejects.toThrow(/requires a conversationId/)
+    expect(fetch).not.toHaveBeenCalled()
+  })
+})
+
+describe('zernioSendMediaToConversation — adjunto en inbox', () => {
+  it('sends an image by public URL with a caption', async () => {
+    const fetchSpy = stubFetchOk({ message: { id: 'zm_i1' } })
+
+    const result = await zernioSendMediaToConversation({
+      conversationId: 'zc_9',
+      kind: 'image',
+      mediaUrl: 'https://cdn.example.test/foto.jpg',
+      caption: 'Aquí la foto',
+    })
+
+    const cap = fetchSpy.captured()
+    expect(cap.url).toBe(`${BASE}/v1/inbox/conversations/zc_9/messages`)
+    expect(cap.body).toEqual({
+      accountId: 'acc_42',
+      attachmentUrl: 'https://cdn.example.test/foto.jpg',
+      attachmentType: 'image',
+      message: 'Aquí la foto',
+    })
+    expect(result).toEqual({ messageId: 'zm_i1' })
+  })
+
+  it('maps document → file and carries the filename as attachmentName', async () => {
+    const fetchSpy = stubFetchOk({ message: { id: 'zm_d1' } })
+    await zernioSendMediaToConversation({
+      conversationId: 'zc_9',
+      kind: 'document',
+      mediaUrl: 'https://cdn.example.test/estudio.zip',
+      filename: 'estudio.zip',
+    })
+    expect(fetchSpy.captured().body).toEqual({
+      accountId: 'acc_42',
+      attachmentUrl: 'https://cdn.example.test/estudio.zip',
+      attachmentType: 'file',
+      attachmentName: 'estudio.zip',
+    })
+  })
+
+  it('marks audio as a voice note and drops the caption', async () => {
+    const fetchSpy = stubFetchOk({ message: { id: 'zm_a1' } })
+    await zernioSendMediaToConversation({
+      conversationId: 'zc_9',
+      kind: 'audio',
+      mediaUrl: 'https://cdn.example.test/nota.ogg',
+      caption: 'ignored',
+    })
+    expect(fetchSpy.captured().body).toEqual({
+      accountId: 'acc_42',
+      attachmentUrl: 'https://cdn.example.test/nota.ogg',
+      attachmentType: 'audio',
+      voiceNote: true,
+    })
+  })
+
+  it('requires conversationId + mediaUrl before any network call', async () => {
+    vi.stubGlobal('fetch', vi.fn())
+    await expect(
+      zernioSendMediaToConversation({ conversationId: '', kind: 'image', mediaUrl: 'x' }),
+    ).rejects.toThrow(/requires a conversationId/)
+    await expect(
+      zernioSendMediaToConversation({ conversationId: 'zc_1', kind: 'image', mediaUrl: '' }),
+    ).rejects.toThrow(/requires a mediaUrl/)
+    expect(fetch).not.toHaveBeenCalled()
   })
 })
 

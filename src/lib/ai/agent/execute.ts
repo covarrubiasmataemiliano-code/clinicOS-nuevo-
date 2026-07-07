@@ -1,0 +1,668 @@
+// ============================================================
+// clinicOS — ejecutor de las herramientas del agente de Atención.
+//
+// Traduce un `tool_use` del modelo en operaciones sobre las tablas de
+// la migración 031, SIEMPRE filtrando por account_id/contact_id del
+// contexto. Devuelve un `tool_result` (JSON) que el modelo lee para
+// componer su respuesta.
+//
+// Invariantes de la regla de oro:
+//   * agendar_cita     → appointments.status = 'pendiente', created_by NULL.
+//   * prevalidar_anticipo → payments.status = 'pendiente' (nunca 'confirmado').
+//   Un humano confirma en el panel; ninguna herramienta lo hace.
+// ============================================================
+
+import {
+  APPOINTMENT_TYPES,
+  LEAD_STAGES,
+  PAYMENT_METHODS,
+  type AgentToolContext,
+  type ClinicalToolName,
+  type ToolExecResult,
+} from './tools'
+import {
+  computeAvailableSlots,
+  type BusyInterval,
+  type ClinicHoursRow,
+} from './availability'
+import {
+  formatSlotLabel,
+  instantFromLocalDateTime,
+  parseClockToMinutes,
+  wallPartsInTz,
+} from './clinic-time'
+
+// Estados de cita que ocupan un hueco (los demás liberan la agenda).
+const ACTIVE_APPT_STATUSES = ['pendiente', 'confirmada', 'completada']
+
+function ok(payload: Record<string, unknown>): ToolExecResult {
+  return { content: JSON.stringify(payload) }
+}
+function fail(message: string): ToolExecResult {
+  return { content: JSON.stringify({ ok: false, error: message }), isError: true }
+}
+
+function money(amount: number | null | undefined, currency = 'MXN'): string | null {
+  if (amount == null || Number.isNaN(amount)) return null
+  return new Intl.NumberFormat('es-MX', {
+    style: 'currency',
+    currency,
+    maximumFractionDigits: 0,
+  }).format(amount)
+}
+
+function num(v: unknown): number | null {
+  if (v == null || v === '') return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
+// ------------------------------------------------------------
+// Parseo de fecha/hora que manda el modelo.
+// ------------------------------------------------------------
+
+/** Detecta si un string trae zona (Z u offset) → instante absoluto. */
+function hasExplicitZone(raw: string): boolean {
+  return /([zZ]|[+-]\d\d:?\d\d)$/.test(raw.trim())
+}
+
+/** Instante desde ISO absoluto, o desde hora local "YYYY-MM-DDTHH:MM". */
+function parseStartInstant(raw: string, tz: string): Date | null {
+  const s = raw.trim()
+  if (hasExplicitZone(s)) {
+    const d = new Date(s)
+    return Number.isNaN(d.getTime()) ? null : d
+  }
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/)
+  if (!m) return null
+  return instantFromLocalDateTime(
+    tz,
+    { year: +m[1], month: +m[2], day: +m[3] },
+    { hour: +m[4], minute: +m[5] },
+  )
+}
+
+/** Instante de inicio de día local desde "YYYY-MM-DD"; clamp a `now`. */
+function parseFromDate(raw: string | undefined, tz: string, now: Date): Date {
+  if (!raw) return now
+  const m = raw.trim().match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (!m) return now
+  const start = instantFromLocalDateTime(
+    tz,
+    { year: +m[1], month: +m[2], day: +m[3] },
+    { hour: 0, minute: 0 },
+  )
+  return start.getTime() < now.getTime() ? now : start
+}
+
+// ------------------------------------------------------------
+// Cargas compartidas
+// ------------------------------------------------------------
+
+async function loadClinicHours(ctx: AgentToolContext): Promise<ClinicHoursRow[]> {
+  const { data } = await ctx.db
+    .from('clinic_hours')
+    .select('weekday, opens_at, closes_at, slot_minutes')
+    .eq('account_id', ctx.accountId)
+  return (data ?? []) as ClinicHoursRow[]
+}
+
+/** Bloqueos + citas activas como intervalos ocupados, desde `from`. */
+async function loadBusy(
+  ctx: AgentToolContext,
+  from: Date,
+  excludeApptId?: string,
+): Promise<BusyInterval[]> {
+  const fromIso = from.toISOString()
+  const [blocks, appts] = await Promise.all([
+    ctx.db
+      .from('schedule_blocks')
+      .select('starts_at, ends_at')
+      .eq('account_id', ctx.accountId)
+      .gt('ends_at', fromIso),
+    ctx.db
+      .from('appointments')
+      .select('id, starts_at, ends_at, status')
+      .eq('account_id', ctx.accountId)
+      .in('status', ACTIVE_APPT_STATUSES)
+      .gt('ends_at', fromIso),
+  ])
+  const busy: BusyInterval[] = []
+  for (const b of blocks.data ?? []) {
+    busy.push({ startsAt: new Date(b.starts_at), endsAt: new Date(b.ends_at) })
+  }
+  for (const a of appts.data ?? []) {
+    if (excludeApptId && a.id === excludeApptId) continue
+    busy.push({ startsAt: new Date(a.starts_at), endsAt: new Date(a.ends_at) })
+  }
+  return busy
+}
+
+/** Cita activa más próxima del contacto (para reagendar / asociar anticipo). */
+async function findActiveAppointment(ctx: AgentToolContext) {
+  const { data } = await ctx.db
+    .from('appointments')
+    .select('id, starts_at, ends_at, status, deposit_status, deposit_amount, procedure_id')
+    .eq('account_id', ctx.accountId)
+    .eq('contact_id', ctx.contactId)
+    .in('status', ['pendiente', 'confirmada'])
+    .order('starts_at', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+  return data
+}
+
+async function loadProcedure(ctx: AgentToolContext, procedureId: string) {
+  const { data } = await ctx.db
+    .from('procedures')
+    .select('id, name, duration_minutes, deposit_amount, currency, is_active')
+    .eq('account_id', ctx.accountId)
+    .eq('id', procedureId)
+    .maybeSingle()
+  return data
+}
+
+async function dropNotification(
+  ctx: AgentToolContext,
+  type: string,
+  title: string,
+  body: string,
+): Promise<void> {
+  await ctx.db.from('notifications').insert({
+    account_id: ctx.accountId,
+    user_id: ctx.userId,
+    type,
+    conversation_id: ctx.conversationId,
+    contact_id: ctx.contactId,
+    actor_user_id: null,
+    title,
+    body,
+  })
+}
+
+// ------------------------------------------------------------
+// Herramientas
+// ------------------------------------------------------------
+
+async function consultarCatalogo(
+  ctx: AgentToolContext,
+  input: { categoria?: string },
+): Promise<ToolExecResult> {
+  let q = ctx.db
+    .from('procedures')
+    .select('id, name, description, category, price_min, price_max, currency, deposit_amount, duration_minutes, sales_notes')
+    .eq('account_id', ctx.accountId)
+    .eq('is_active', true)
+    .order('name', { ascending: true })
+  if (input.categoria) q = q.ilike('category', `%${input.categoria}%`)
+
+  const { data, error } = await q
+  if (error) return fail(`No pude leer el catálogo: ${error.message}`)
+
+  const items = (data ?? []).map((p) => {
+    const min = num(p.price_min)
+    const max = num(p.price_max)
+    let precio: string
+    if (min != null && max != null && min !== max) {
+      precio = `${money(min, p.currency)}–${money(max, p.currency)}`
+    } else if (min != null || max != null) {
+      precio = money((min ?? max)!, p.currency)!
+    } else {
+      precio = 'se define en la valoración'
+    }
+    const dep = num(p.deposit_amount)
+    return {
+      id: p.id,
+      nombre: p.name,
+      categoria: p.category ?? null,
+      descripcion: p.description ?? null,
+      precio,
+      anticipo: dep != null ? money(dep, p.currency) : 'sin anticipo',
+      duracion_minutos: p.duration_minutes,
+      notas_venta: p.sales_notes ?? null,
+    }
+  })
+
+  return ok({
+    ok: true,
+    total: items.length,
+    procedimientos: items,
+    recordatorio:
+      'Los precios son rangos; el costo exacto se define en la valoración con el doctor.',
+  })
+}
+
+async function consultarDisponibilidad(
+  ctx: AgentToolContext,
+  input: {
+    desde?: string
+    dias?: number
+    duracion_minutos?: number
+    procedure_id?: string
+  },
+): Promise<ToolExecResult> {
+  const hours = await loadClinicHours(ctx)
+  if (hours.length === 0) {
+    return ok({
+      ok: true,
+      huecos: [],
+      nota: 'No hay horario de atención configurado. Escala para que el equipo te dé fechas.',
+    })
+  }
+
+  let duration = input.duracion_minutos ?? 0
+  if (!duration && input.procedure_id) {
+    const proc = await loadProcedure(ctx, input.procedure_id)
+    if (proc) duration = proc.duration_minutes
+  }
+  if (!duration) duration = 30 // valoración corta por defecto
+
+  const days = Math.min(Math.max(input.dias ?? 7, 1), 30)
+  const from = parseFromDate(input.desde, ctx.timezone, ctx.now)
+  const busy = await loadBusy(ctx, from)
+
+  const slots = computeAvailableSlots({
+    timezone: ctx.timezone,
+    hours,
+    busy,
+    durationMinutes: duration,
+    from,
+    days,
+    limit: 8,
+  })
+
+  return ok({
+    ok: true,
+    duracion_minutos: duration,
+    huecos: slots.map((s) => ({
+      inicio: s.startsAt.toISOString(),
+      etiqueta: formatSlotLabel(s.startsAt, ctx.timezone),
+    })),
+    nota:
+      slots.length === 0
+        ? `No hay huecos libres en los próximos ${days} días. Ofrece otra fecha o escala.`
+        : 'Ofrece al paciente máximo dos opciones (una en la mañana y una en la tarde).',
+  })
+}
+
+/** ¿La cita cae dentro de alguna ventana de `clinic_hours` de su día? */
+function withinClinicHours(
+  start: Date,
+  end: Date,
+  hours: ClinicHoursRow[],
+  tz: string,
+): boolean {
+  const ws = wallPartsInTz(start, tz)
+  const we = wallPartsInTz(end, tz)
+  const startMin = ws.hour * 60 + ws.minute
+  const endMin = we.hour * 60 + we.minute + (we.day !== ws.day ? 24 * 60 : 0)
+  return hours.some(
+    (h) =>
+      h.weekday === ws.weekday &&
+      parseClockToMinutes(h.opens_at) <= startMin &&
+      endMin <= parseClockToMinutes(h.closes_at),
+  )
+}
+
+async function agendarCita(
+  ctx: AgentToolContext,
+  input: {
+    inicio: string
+    tipo?: string
+    procedure_id?: string
+    notas?: string
+  },
+): Promise<ToolExecResult> {
+  const start = parseStartInstant(input.inicio, ctx.timezone)
+  if (!start) {
+    return fail(
+      'No entendí la fecha/hora. Usa un hueco de consultar_disponibilidad (ISO) o "YYYY-MM-DDTHH:MM".',
+    )
+  }
+  if (start.getTime() <= ctx.now.getTime()) {
+    return fail('Ese horario ya pasó. Propón una fecha futura.')
+  }
+
+  const proc = input.procedure_id
+    ? await loadProcedure(ctx, input.procedure_id)
+    : null
+  if (input.procedure_id && !proc) {
+    return fail('Ese procedure_id no existe. Consulta el catálogo primero.')
+  }
+  const duration = proc?.duration_minutes ?? 60
+  const end = new Date(start.getTime() + duration * 60 * 1000)
+
+  const hours = await loadClinicHours(ctx)
+  if (hours.length > 0 && !withinClinicHours(start, end, hours, ctx.timezone)) {
+    return fail(
+      'Ese horario está fuera del horario de atención. Usa consultar_disponibilidad.',
+    )
+  }
+
+  // ¿Reagendar la cita activa del contacto en vez de crear otra?
+  const existing = await findActiveAppointment(ctx)
+  const busy = await loadBusy(ctx, ctx.now, existing?.id)
+  const clash = busy.some(
+    (b) => start.getTime() < b.endsAt.getTime() && b.startsAt.getTime() < end.getTime(),
+  )
+  if (clash) {
+    return fail('Ese hueco ya no está libre. Vuelve a consultar_disponibilidad.')
+  }
+
+  const tipo = APPOINTMENT_TYPES.includes(input.tipo as never)
+    ? input.tipo
+    : 'valoracion'
+  const depositAmount = num(proc?.deposit_amount)
+  const depositStatus = depositAmount != null ? 'pendiente' : 'no_aplica'
+
+  const row = {
+    account_id: ctx.accountId,
+    contact_id: ctx.contactId,
+    conversation_id: ctx.conversationId,
+    procedure_id: proc?.id ?? null,
+    appointment_type: tipo,
+    // Regla de oro: el agente SIEMPRE deja la cita pendiente.
+    status: 'pendiente',
+    deposit_status: depositStatus,
+    deposit_amount: depositAmount,
+    starts_at: start.toISOString(),
+    ends_at: end.toISOString(),
+    notes: input.notas ?? null,
+    created_by: null, // NULL = creada por el agente IA
+  }
+
+  let appointmentId: string
+  let reagendada = false
+  if (existing) {
+    const { data, error } = await ctx.db
+      .from('appointments')
+      .update(row)
+      .eq('id', existing.id)
+      .eq('account_id', ctx.accountId)
+      .select('id')
+      .single()
+    if (error) return fail(`No pude reagendar la cita: ${error.message}`)
+    appointmentId = data.id
+    reagendada = true
+  } else {
+    const { data, error } = await ctx.db
+      .from('appointments')
+      .insert(row)
+      .select('id')
+      .single()
+    if (error) return fail(`No pude apartar la cita: ${error.message}`)
+    appointmentId = data.id
+  }
+
+  const label = formatSlotLabel(start, ctx.timezone)
+  await dropNotification(
+    ctx,
+    'ai_appointment_created',
+    reagendada ? 'El agente reagendó una cita' : 'El agente apartó una cita',
+    `${ctx.contactName ?? 'Un paciente'} — ${label}${
+      proc ? ` · ${proc.name}` : ''
+    }. Pendiente de confirmar${
+      depositAmount != null ? ` (anticipo ${money(depositAmount, proc?.currency)})` : ''
+    }.`,
+  )
+
+  return ok({
+    ok: true,
+    appointment_id: appointmentId,
+    reagendada,
+    inicio: start.toISOString(),
+    etiqueta: label,
+    estado: 'pendiente',
+    anticipo_requerido: depositAmount != null ? money(depositAmount, proc?.currency) : null,
+    instruccion_para_paciente:
+      depositAmount != null
+        ? `Dile que le APARTAS el lugar para ${label} y que, para dejarlo asegurado, necesita el anticipo de ${money(depositAmount, proc?.currency)}; pídele el comprobante. NO digas que la cita ya quedó confirmada.`
+        : `Dile que le APARTAS el lugar para ${label} y que el equipo se lo confirma por aquí. NO digas que ya quedó confirmada en firme.`,
+  })
+}
+
+async function prevalidarAnticipo(
+  ctx: AgentToolContext,
+  input: {
+    appointment_id?: string
+    monto?: number
+    metodo?: string
+    concepto?: string
+    comprobante_url?: string
+  },
+): Promise<ToolExecResult> {
+  let appointment = null as Awaited<ReturnType<typeof findActiveAppointment>>
+  if (input.appointment_id) {
+    const { data } = await ctx.db
+      .from('appointments')
+      .select('id, deposit_amount, deposit_status, procedure_id')
+      .eq('account_id', ctx.accountId)
+      .eq('contact_id', ctx.contactId)
+      .eq('id', input.appointment_id)
+      .maybeSingle()
+    appointment = data as never
+  } else {
+    appointment = await findActiveAppointment(ctx)
+  }
+  if (!appointment) {
+    return fail(
+      'No encontré una cita para asociar el anticipo. Aparta la cita primero con agendar_cita.',
+    )
+  }
+
+  let amount = num(input.monto) ?? num(appointment.deposit_amount)
+  let currency = 'MXN'
+  if (amount == null && appointment.procedure_id) {
+    const proc = await loadProcedure(ctx, appointment.procedure_id)
+    amount = num(proc?.deposit_amount)
+    currency = proc?.currency ?? 'MXN'
+  }
+  if (amount == null || amount <= 0) {
+    return fail(
+      'No sé el monto del anticipo. Pídeselo al paciente o pásalo en "monto".',
+    )
+  }
+
+  const metodo = PAYMENT_METHODS.includes(input.metodo as never)
+    ? input.metodo
+    : 'transferencia'
+
+  const { data: payment, error } = await ctx.db
+    .from('payments')
+    .insert({
+      account_id: ctx.accountId,
+      contact_id: ctx.contactId,
+      appointment_id: appointment.id,
+      amount,
+      currency,
+      method: metodo,
+      // Regla de oro: prevalidado, NUNCA 'confirmado'. Un humano confirma.
+      status: 'pendiente',
+      concept: input.concepto ?? 'Anticipo',
+      receipt_url: input.comprobante_url ?? null,
+    })
+    .select('id')
+    .single()
+  if (error) return fail(`No pude registrar el anticipo: ${error.message}`)
+
+  // La cita sigue 'pendiente'; solo marcamos el anticipo en revisión.
+  await ctx.db
+    .from('appointments')
+    .update({ deposit_status: 'pendiente' })
+    .eq('id', appointment.id)
+    .eq('account_id', ctx.accountId)
+
+  await dropNotification(
+    ctx,
+    'ai_deposit_prevalidated',
+    'Anticipo por confirmar',
+    `${ctx.contactName ?? 'Un paciente'} envió un anticipo de ${money(
+      amount,
+      currency,
+    )} (${metodo}). Revisa el comprobante y confírmalo en el panel.`,
+  )
+
+  return ok({
+    ok: true,
+    payment_id: payment.id,
+    monto: money(amount, currency),
+    estado: 'en_revision',
+    instruccion_para_paciente:
+      'Dile TEXTUALMENTE que recibiste su comprobante y quedó EN REVISIÓN del equipo, y que le avisas por aquí en cuanto quede confirmado. NUNCA digas que el pago o la cita quedaron confirmados.',
+  })
+}
+
+async function clasificarLead(
+  ctx: AgentToolContext,
+  input: { etapa: string; nombre?: string; ciudad?: string; notas?: string },
+): Promise<ToolExecResult> {
+  if (!LEAD_STAGES.includes(input.etapa as never)) {
+    return fail(`etapa inválida. Usa una de: ${LEAD_STAGES.join(', ')}.`)
+  }
+
+  // Actualiza el nombre del contacto si lo capturamos y aún no lo teníamos.
+  if (input.nombre && input.nombre.trim()) {
+    await ctx.db
+      .from('contacts')
+      .update({ name: input.nombre.trim(), updated_at: new Date().toISOString() })
+      .eq('id', ctx.contactId)
+      .eq('account_id', ctx.accountId)
+  }
+
+  // Etiqueta de embudo: una sola vigente por contacto. Las tags son
+  // por-usuario (modelo wacrm pre-017); usamos al dueño de la cuenta.
+  const tagName = `lead:${input.etapa}`
+  const { data: tag } = await ctx.db
+    .from('tags')
+    .select('id')
+    .eq('user_id', ctx.userId)
+    .eq('name', tagName)
+    .maybeSingle()
+  let tagId = tag?.id
+  if (!tagId) {
+    const { data: created } = await ctx.db
+      .from('tags')
+      .insert({ user_id: ctx.userId, name: tagName, color: '#0ea5e9' })
+      .select('id')
+      .single()
+    tagId = created?.id
+  }
+
+  if (tagId) {
+    // Quita otras etiquetas de embudo del contacto (el embudo se
+    // representa con una sola etapa vigente).
+    const { data: funnelTags } = await ctx.db
+      .from('tags')
+      .select('id')
+      .eq('user_id', ctx.userId)
+      .like('name', 'lead:%')
+    const otherIds = (funnelTags ?? []).map((t) => t.id).filter((id) => id !== tagId)
+    if (otherIds.length > 0) {
+      await ctx.db
+        .from('contact_tags')
+        .delete()
+        .eq('contact_id', ctx.contactId)
+        .in('tag_id', otherIds)
+    }
+    await ctx.db
+      .from('contact_tags')
+      .upsert(
+        { contact_id: ctx.contactId, tag_id: tagId },
+        { onConflict: 'contact_id,tag_id' },
+      )
+  }
+
+  return ok({
+    ok: true,
+    etapa: input.etapa,
+    nombre_guardado: input.nombre?.trim() || null,
+    nota: 'CRM actualizado. No se lo menciones al paciente; sigue la conversación con naturalidad.',
+  })
+}
+
+async function avisarEquipo(
+  ctx: AgentToolContext,
+  input: { nota: string },
+): Promise<ToolExecResult> {
+  if (!input.nota || !input.nota.trim()) return fail('Falta la nota para el equipo.')
+  await dropNotification(
+    ctx,
+    'ai_escalation',
+    'Aviso del agente al equipo',
+    `${ctx.contactName ?? 'Un paciente'}: ${input.nota.trim()}`,
+  )
+  return ok({
+    ok: true,
+    instruccion_para_paciente:
+      'El equipo ya tiene el aviso. Puedes seguir atendiendo lo general; solo di que ya lo notificaste si es natural.',
+  })
+}
+
+async function escalarAHumano(
+  ctx: AgentToolContext,
+  input: { motivo: string; urgente?: boolean },
+): Promise<ToolExecResult> {
+  // Apaga el auto-reply de esta conversación: el humano toma el hilo.
+  await ctx.db
+    .from('conversations')
+    .update({ ai_autoreply_disabled: true })
+    .eq('id', ctx.conversationId)
+    .eq('account_id', ctx.accountId)
+
+  await dropNotification(
+    ctx,
+    'ai_escalation',
+    input.urgente ? '🔴 Escalación urgente del agente' : 'El agente escaló una conversación',
+    `${ctx.contactName ?? 'Un paciente'} — ${input.motivo}`,
+  )
+
+  return {
+    content: JSON.stringify({
+      ok: true,
+      escalado: true,
+      instruccion_para_paciente:
+        'Despídete con UNA línea breve: dile que en un momento le contacta el equipo. No sigas resolviendo el tema.',
+    }),
+    escalated: true,
+  }
+}
+
+// ------------------------------------------------------------
+// Dispatch
+// ------------------------------------------------------------
+
+/**
+ * Ejecuta una herramienta por nombre. Nunca lanza: cualquier fallo se
+ * devuelve como `tool_result` de error para que el modelo pueda
+ * reaccionar (o cerrar con gracia) en vez de tumbar el turno.
+ */
+export async function executeClinicalTool(
+  name: string,
+  input: unknown,
+  ctx: AgentToolContext,
+): Promise<ToolExecResult> {
+  const args = (input ?? {}) as never
+  try {
+    switch (name as ClinicalToolName) {
+      case 'consultar_catalogo':
+        return await consultarCatalogo(ctx, args)
+      case 'consultar_disponibilidad':
+        return await consultarDisponibilidad(ctx, args)
+      case 'agendar_cita':
+        return await agendarCita(ctx, args)
+      case 'prevalidar_anticipo':
+        return await prevalidarAnticipo(ctx, args)
+      case 'clasificar_lead':
+        return await clasificarLead(ctx, args)
+      case 'avisar_equipo':
+        return await avisarEquipo(ctx, args)
+      case 'escalar_a_humano':
+        return await escalarAHumano(ctx, args)
+      default:
+        return fail(`Herramienta desconocida: ${name}`)
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return fail(`Error ejecutando ${name}: ${msg}`)
+  }
+}

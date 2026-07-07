@@ -70,10 +70,11 @@ async function ensureUser() {
   }
 
   // El trigger handle_new_user crea profile + account (rol owner).
+  // OJO: en profiles el id del usuario de auth vive en `user_id`, no en `id`.
   const { data: profile, error: pErr } = await db
     .from("profiles")
-    .select("id, account_id")
-    .eq("id", user.id)
+    .select("account_id")
+    .eq("user_id", user.id)
     .single();
   if (pErr) throw pErr;
 

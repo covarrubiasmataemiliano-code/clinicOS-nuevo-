@@ -156,6 +156,14 @@ export interface Conversation {
   last_message_text?: string;
   last_message_at?: string;
   unread_count: number;
+  /**
+   * true → la IA no auto-responde en este hilo (control humano). Es el
+   * interruptor "Modo IA / Modo humano" del panel; lo respeta el
+   * auto-reply (src/lib/ai/auto-reply.ts).
+   */
+  ai_autoreply_disabled?: boolean;
+  /** Id de conversación de inbox de Zernio (si llegó por Zernio). */
+  zernio_conversation_id?: string | null;
   created_at: string;
   updated_at: string;
   contact?: Contact;
@@ -165,7 +173,14 @@ export interface Conversation {
 // Notifications (migration 027)
 // ============================================================
 
-export type NotificationType = 'conversation_assigned';
+export type NotificationType =
+  | 'conversation_assigned'
+  // Avisos del agente de Atención (migración 032). El agente clínico
+  // los deja en la sección Notificaciones cuando escala, prevalida un
+  // anticipo o aparta una cita — siempre pendientes de un humano.
+  | 'ai_escalation'
+  | 'ai_deposit_prevalidated'
+  | 'ai_appointment_created';
 
 export interface Notification {
   id: string;

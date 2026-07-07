@@ -12,7 +12,6 @@ import { useRealtime } from "@/hooks/use-realtime";
 import { ConversationList } from "@/components/inbox/conversation-list";
 import { MessageThread } from "@/components/inbox/message-thread";
 import { ContactSidebar } from "@/components/inbox/contact-sidebar";
-import { toast } from "sonner";
 import { WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -541,6 +540,55 @@ export default function InboxPage() {
     [activeConversation]
   );
 
+  // El agente cambió el modo IA↔humano — refleja ai_autoreply_disabled en
+  // la lista y en la conversación activa (el hilo ya hizo el UPDATE).
+  const handleAiModeChange = useCallback(
+    (conversationId: string, aiDisabled: boolean) => {
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === conversationId
+            ? { ...c, ai_autoreply_disabled: aiDisabled }
+            : c
+        )
+      );
+      if (activeConversation?.id === conversationId) {
+        setActiveConversation((prev) =>
+          prev ? { ...prev, ai_autoreply_disabled: aiDisabled } : prev
+        );
+      }
+    },
+    [activeConversation]
+  );
+
+  // Se limpiaron los mensajes — vacía el preview de la lista.
+  const handleConversationCleared = useCallback((conversationId: string) => {
+    setConversations((prev) =>
+      prev.map((c) =>
+        c.id === conversationId
+          ? { ...c, last_message_text: "", unread_count: 0 }
+          : c
+      )
+    );
+    if (activeConversation?.id === conversationId) {
+      setMessages([]);
+    }
+  }, [activeConversation]);
+
+  // Se eliminó la conversación — quítala de la lista y cierra el hilo.
+  const handleConversationDeleted = useCallback(
+    (conversationId: string) => {
+      setConversations((prev) => prev.filter((c) => c.id !== conversationId));
+      if (activeConversation?.id === conversationId) {
+        setActiveConversation(null);
+        setActiveContact(null);
+        setMessages([]);
+        autoSelectedForDeepLinkRef.current = null;
+        router.replace("/inbox", { scroll: false });
+      }
+    },
+    [activeConversation, router]
+  );
+
   // On mobile (<lg) we show a SINGLE pane — either the list or the
   // thread — rather than cramming both side-by-side. Selecting a
   // conversation slides the thread in; the thread's back button pops
@@ -610,6 +658,9 @@ export default function InboxPage() {
             onRefresh={handleManualRefresh}
             contactPanelOpen={contactPanelOpen}
             onToggleContactPanel={handleToggleContactPanel}
+            onAiModeChange={handleAiModeChange}
+            onCleared={handleConversationCleared}
+            onDeleted={handleConversationDeleted}
           />
         </div>
 

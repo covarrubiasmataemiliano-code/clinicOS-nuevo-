@@ -123,6 +123,9 @@ export interface MappedZernioInbound {
   contentText: string | null
   mediaUrl: string | null
   createdAtIso: string
+  /** Zernio's inbox conversation id — needed to REPLY (freeform sends go
+   *  to /v1/inbox/conversations/{id}/messages, not by phone). */
+  zernioConversationId: string | null
 }
 
 /**
@@ -153,6 +156,7 @@ export function mapZernioInbound(message: ZernioInboundMessage): MappedZernioInb
     createdAtIso: message.sentAt
       ? new Date(message.sentAt).toISOString()
       : new Date().toISOString(),
+    zernioConversationId: message.conversationId || null,
   }
 }
 
@@ -336,6 +340,12 @@ async function processZernioInboundMessage(payload: ZernioWebhookEvent): Promise
       last_message_at: new Date().toISOString(),
       unread_count: (conversation.unread_count || 0) + 1,
       updated_at: new Date().toISOString(),
+      // Persistimos (y refrescamos) el id de conversación de Zernio para
+      // que un humano en el panel pueda responder por la vía de inbox —
+      // el webhook es la única fuente de este id. Ver send-message.ts.
+      ...(mapped.zernioConversationId
+        ? { zernio_conversation_id: mapped.zernioConversationId }
+        : {}),
     })
     .eq('id', conversation.id)
   if (convError) {
@@ -379,6 +389,9 @@ async function processZernioInboundMessage(payload: ZernioWebhookEvent): Promise
       conversationId: conversation.id,
       contactId: contact.id,
       configOwnerUserId: userId,
+      // La respuesta debe volver a ESTA conversación de Zernio (envío por
+      // inbox, no por teléfono). Ver zernioSendToConversation.
+      zernioConversationId: mapped.zernioConversationId,
     })
   }
 
