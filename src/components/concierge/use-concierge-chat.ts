@@ -77,6 +77,9 @@ export interface SendResult {
   error: string | null;
   /** Respuesta final del asistente (para TTS/auto-play). */
   reply: { id: string; text: string } | null;
+  /** true si el turno navegó la vista en vivo (abrir_seccion) — la
+   *  página activa la voz para que la respuesta se escuche. */
+  navigated: boolean;
 }
 
 let tempCounter = 0;
@@ -205,6 +208,7 @@ export function useConciergeChat(opts: { onNavigate?: (href: string) => void } =
       let resolvedSessionId: string | null = sessionId;
       let turnError: string | null = null;
       let replyText = '';
+      let navigated = false;
 
       try {
         const res = await fetch('/api/ai/concierge/chat', {
@@ -225,7 +229,7 @@ export function useConciergeChat(opts: { onNavigate?: (href: string) => void } =
               ? 'ai_not_configured'
               : (data.error ?? 'No pude contactar al Concierge.');
           setMessages((prev) => prev.filter((m) => m.id !== userMsg.id));
-          return { sessionId: resolvedSessionId, error: turnError, reply: null };
+          return { sessionId: resolvedSessionId, error: turnError, reply: null, navigated };
         }
 
         const reader = res.body.getReader();
@@ -277,6 +281,7 @@ export function useConciergeChat(opts: { onNavigate?: (href: string) => void } =
               // Navegación autónoma: solo el evento EN VIVO mueve la
               // vista (el historial re-pinta el chip sin navegar).
               if (block.kind === 'navegacion') {
+                navigated = true;
                 onNavigateRef.current?.(block.href);
               }
               break;
@@ -318,12 +323,13 @@ export function useConciergeChat(opts: { onNavigate?: (href: string) => void } =
         if (turnError) {
           // El turno del usuario SÍ quedó persistido server-side; solo
           // avisamos del fallo sin borrar nada.
-          return { sessionId: resolvedSessionId, error: turnError, reply: null };
+          return { sessionId: resolvedSessionId, error: turnError, reply: null, navigated };
         }
         return {
           sessionId: resolvedSessionId,
           error: null,
           reply: replyText ? { id: assistantMsgId, text: replyText } : null,
+          navigated,
         };
       } catch {
         setMessages((prev) => prev.filter((m) => m.id !== userMsg.id));
@@ -331,6 +337,7 @@ export function useConciergeChat(opts: { onNavigate?: (href: string) => void } =
           sessionId: resolvedSessionId,
           error: 'No pude contactar al Concierge.',
           reply: null,
+          navigated,
         };
       } finally {
         setSending(false);

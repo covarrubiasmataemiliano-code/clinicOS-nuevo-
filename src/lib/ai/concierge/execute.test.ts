@@ -351,6 +351,276 @@ describe('tools de lectura del Concierge', () => {
     expect(blocks[0]).toMatchObject({ kind: 'agenda', fecha: '2026-07-20', citas: [] })
   })
 
+  it('consultar_agenda_rango agrupa por día local y emite una tarjeta por día con citas', async () => {
+    const db = fakeDb({
+      appointments: [
+        // 2026-07-08 12:00 local (CDMX = UTC-6)
+        {
+          id: 'a-1',
+          account_id: ACCOUNT,
+          contact_id: 'c-1',
+          starts_at: '2026-07-08T18:00:00Z',
+          status: 'pendiente',
+          appointment_type: 'valoracion',
+          deposit_status: 'pendiente',
+          deposit_amount: 350,
+        },
+        // 2026-07-09 16:00 local
+        {
+          id: 'a-2',
+          account_id: ACCOUNT,
+          contact_id: 'c-1',
+          starts_at: '2026-07-09T22:00:00Z',
+          status: 'confirmada',
+          appointment_type: 'seguimiento',
+          deposit_status: 'no_aplica',
+          deposit_amount: null,
+        },
+        // Fuera del rango de 7 días (empieza hoy 2026-07-08)
+        {
+          id: 'a-3',
+          account_id: ACCOUNT,
+          contact_id: 'c-1',
+          starts_at: '2026-07-20T18:00:00Z',
+          status: 'pendiente',
+          appointment_type: 'valoracion',
+          deposit_status: 'no_aplica',
+          deposit_amount: null,
+        },
+      ],
+      contacts: [{ id: 'c-1', account_id: ACCOUNT, name: 'María', phone: '555' }],
+    })
+    const blocks: ConciergeBlock[] = []
+    const exec = makeExecutor({ blocks })
+
+    const res = await exec('consultar_agenda_rango', {}, ctxWith(db))
+    const out = JSON.parse(res.content)
+
+    expect(res.isError).toBeUndefined()
+    expect(out.desde).toBe('2026-07-08')
+    expect(out.hasta).toBe('2026-07-14')
+    expect(out.total).toBe(2)
+    expect(out.dias).toHaveLength(2)
+    expect(out.dias[0]).toMatchObject({ fecha: '2026-07-08', total: 1 })
+    expect(out.dias[0].citas[0].appointment_id).toBe('a-1')
+    expect(out.dias[1]).toMatchObject({ fecha: '2026-07-09', total: 1 })
+
+    // Una tarjeta de agenda por día con citas (la del 20 no entra).
+    expect(blocks).toHaveLength(2)
+    expect(blocks[0]).toMatchObject({ kind: 'agenda', fecha: '2026-07-08' })
+    expect(blocks[1]).toMatchObject({ kind: 'agenda', fecha: '2026-07-09' })
+  })
+
+  it('consultar_agenda_rango sin citas lo dice con el rango explícito (sin tarjetas)', async () => {
+    const db = fakeDb()
+    const blocks: ConciergeBlock[] = []
+    const exec = makeExecutor({ blocks })
+
+    const res = await exec(
+      'consultar_agenda_rango',
+      { desde: '2026-08-01', dias: 5 },
+      ctxWith(db),
+    )
+    const out = JSON.parse(res.content)
+
+    expect(out.total).toBe(0)
+    expect(out.nota).toContain('No hay citas agendadas entre 2026-08-01 y 2026-08-05')
+    expect(blocks).toHaveLength(0)
+  })
+
+  it('ver_paciente arma el perfil completo: citas, pagos, embudo, expediente y conversación', async () => {
+    const db = fakeDb({
+      contacts: [
+        {
+          id: 'c-1',
+          account_id: ACCOUNT,
+          name: 'María López',
+          phone: '5215555550001',
+          email: 'maria@x.com',
+          company: null,
+          created_at: '2026-06-01T18:00:00Z',
+        },
+      ],
+      contact_tags: [{ contact_id: 'c-1', tag_id: 't-1' }],
+      tags: [{ id: 't-1', account_id: ACCOUNT, name: 'VIP' }],
+      appointments: [
+        {
+          id: 'a-1',
+          account_id: ACCOUNT,
+          contact_id: 'c-1',
+          starts_at: '2026-07-09T22:00:00Z',
+          status: 'pendiente',
+          appointment_type: 'valoracion',
+          deposit_status: 'pendiente',
+          deposit_amount: 350,
+          notes: null,
+        },
+        {
+          id: 'a-0',
+          account_id: ACCOUNT,
+          contact_id: 'c-1',
+          starts_at: '2026-06-10T18:00:00Z',
+          status: 'completada',
+          appointment_type: 'valoracion',
+          deposit_status: 'pagado',
+          deposit_amount: 350,
+          notes: null,
+        },
+      ],
+      payments: [
+        {
+          id: 'p-1',
+          account_id: ACCOUNT,
+          contact_id: 'c-1',
+          amount: 350,
+          currency: 'MXN',
+          method: 'transferencia',
+          status: 'confirmado',
+          concept: 'Anticipo valoración',
+          receipt_url: 'https://x/r.jpg',
+          created_at: '2026-06-09T18:00:00Z',
+        },
+      ],
+      deals: [
+        {
+          id: 'd-1',
+          account_id: ACCOUNT,
+          contact_id: 'c-1',
+          title: 'María López',
+          value: 700,
+          status: 'open',
+          stage_id: 'st-1',
+        },
+      ],
+      pipeline_stages: [{ id: 'st-1', pipeline_id: 'pipe-1', name: 'Interesada' }],
+      patient_records: [
+        {
+          account_id: ACCOUNT,
+          contact_id: 'c-1',
+          category: 'alergia',
+          content: 'Alergia a penicilina',
+          is_active: true,
+          created_at: '2026-06-10T19:00:00Z',
+        },
+      ],
+      conversations: [
+        {
+          id: 'conv-1',
+          account_id: ACCOUNT,
+          contact_id: 'c-1',
+          status: 'open',
+          last_message_text: 'Nos vemos mañana, gracias',
+          last_message_at: '2026-07-07T20:00:00Z',
+        },
+      ],
+    })
+    const exec = makeExecutor()
+
+    const res = await exec('ver_paciente', { contact_id: 'c-1' }, ctxWith(db))
+    const out = JSON.parse(res.content)
+
+    expect(res.isError).toBeUndefined()
+    expect(out.paciente).toMatchObject({
+      contact_id: 'c-1',
+      nombre: 'María López',
+      telefono: '5215555550001',
+      tags: ['VIP'],
+    })
+    expect(out.citas_proximas).toHaveLength(1)
+    expect(out.citas_proximas[0].estado).toBe('pendiente de confirmar')
+    expect(out.citas_pasadas).toHaveLength(1)
+    expect(out.citas_pasadas[0].estado).toBe('completada')
+    expect(out.pagos[0]).toMatchObject({
+      payment_id: 'p-1',
+      monto: '$350 MXN',
+      estado: 'confirmado',
+      comprobante: 'adjunto',
+    })
+    expect(out.embudo[0]).toMatchObject({ deal_id: 'd-1', etapa: 'Interesada' })
+    expect(out.expediente[0].dato).toBe('Alergia a penicilina')
+    expect(out.conversacion.ultimo_mensaje).toBe('Nos vemos mañana, gracias')
+  })
+
+  it('ver_paciente con contact_id de otra cuenta → error', async () => {
+    const db = fakeDb({
+      contacts: [{ id: 'c-9', account_id: 'otra-cuenta', name: 'Ajena', phone: '1' }],
+    })
+    const exec = makeExecutor()
+    const res = await exec('ver_paciente', { contact_id: 'c-9' }, ctxWith(db))
+    expect(res.isError).toBe(true)
+  })
+
+  it('listar_pacientes lista solo la cuenta, con tags y próxima cita', async () => {
+    const db = fakeDb({
+      contacts: [
+        {
+          id: 'c-1',
+          account_id: ACCOUNT,
+          name: 'María López',
+          phone: '5215555550001',
+          email: null,
+          created_at: '2026-07-01T18:00:00Z',
+        },
+        {
+          id: 'c-2',
+          account_id: ACCOUNT,
+          name: 'Karla Ortiz',
+          phone: '5215555550002',
+          email: null,
+          created_at: '2026-07-05T18:00:00Z',
+        },
+        {
+          id: 'c-x',
+          account_id: 'otra-cuenta',
+          name: 'Ajena',
+          phone: '1',
+          email: null,
+          created_at: '2026-07-06T18:00:00Z',
+        },
+      ],
+      contact_tags: [{ contact_id: 'c-1', tag_id: 't-1' }],
+      tags: [{ id: 't-1', account_id: ACCOUNT, name: 'VIP' }],
+      appointments: [
+        {
+          id: 'a-1',
+          account_id: ACCOUNT,
+          contact_id: 'c-1',
+          starts_at: '2026-07-09T22:00:00Z',
+          status: 'pendiente',
+        },
+      ],
+    })
+    const exec = makeExecutor()
+
+    const res = await exec('listar_pacientes', {}, ctxWith(db))
+    const out = JSON.parse(res.content)
+
+    expect(out.total).toBe(2)
+    // Más recientes primero; la de otra cuenta no aparece.
+    expect(out.pacientes.map((p: { nombre: string }) => p.nombre)).toEqual([
+      'Karla Ortiz',
+      'María López',
+    ])
+    const maria = out.pacientes[1]
+    expect(maria.tags).toEqual(['VIP'])
+    expect(maria.proxima_cita).toBeTruthy()
+    expect(out.pacientes[0].proxima_cita).toBeNull()
+  })
+
+  it('listar_pacientes con filtro de texto', async () => {
+    const db = fakeDb({
+      contacts: [
+        { id: 'c-1', account_id: ACCOUNT, name: 'María López', phone: '555', email: null, created_at: '2026-07-01T18:00:00Z' },
+        { id: 'c-2', account_id: ACCOUNT, name: 'Karla Ortiz', phone: '777', email: null, created_at: '2026-07-05T18:00:00Z' },
+      ],
+    })
+    const exec = makeExecutor()
+    const res = await exec('listar_pacientes', { buscar: 'maría' }, ctxWith(db))
+    const out = JSON.parse(res.content)
+    expect(out.total).toBe(1)
+    expect(out.pacientes[0].nombre).toBe('María López')
+  })
+
   it('consultar_embudo incluye stage_id y deal_id (los necesita mover_deal)', async () => {
     const db = fakeDb({
       pipelines: [{ id: 'pipe-1', account_id: ACCOUNT, name: 'Embudo IA' }],

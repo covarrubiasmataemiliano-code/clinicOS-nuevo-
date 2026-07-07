@@ -31,6 +31,7 @@ import {
 } from './tools'
 import {
   CONCIERGE_SECTIONS,
+  type AgendaBlockCita,
   type ConciergeBlock,
   type ConciergeSectionKey,
 } from './blocks'
@@ -133,6 +134,61 @@ async function contactNamesById(
 // Lectura (variantes con IDs de las tools internas)
 // ------------------------------------------------------------
 
+const pad2 = (n: number) => String(n).padStart(2, '0')
+
+/** "YYYY-MM-DD" del instante en la zona de la clínica. */
+function fechaLocal(instant: Date, tz: string): string {
+  const w = wallPartsInTz(instant, tz)
+  return `${w.year}-${pad2(w.month)}-${pad2(w.day)}`
+}
+
+interface ApptRow {
+  id: unknown
+  contact_id: unknown
+  starts_at: unknown
+  status: unknown
+  appointment_type: unknown
+  deposit_status: unknown
+  deposit_amount: unknown
+}
+
+/** Filas de BD → citas del bloque de agenda (estados crudos + labels). */
+function toBlockCitas(
+  appts: ApptRow[],
+  nameById: Map<string, string>,
+  tz: string,
+): AgendaBlockCita[] {
+  return appts.map((a) => ({
+    appointment_id: a.id as string,
+    contact_id: a.contact_id as string,
+    paciente: nameById.get(a.contact_id as string) ?? 'Sin nombre',
+    hora: formatSlotLabel(new Date(a.starts_at as string), tz),
+    tipo: (a.appointment_type as string | null) ?? null,
+    estado: a.status as string,
+    estado_label: APPT_STATUS_LABEL[a.status as string] ?? (a.status as string),
+    anticipo_estado: (a.deposit_status as string) ?? 'no_aplica',
+    anticipo:
+      a.deposit_status === 'pendiente'
+        ? `pendiente${a.deposit_amount != null ? ` (${fmtMoney(a.deposit_amount)})` : ''}`
+        : a.deposit_status === 'pagado'
+          ? 'pagado'
+          : 'no aplica',
+  }))
+}
+
+/** Citas del bloque → forma para el modelo (solo la etiqueta legible). */
+function toModelCitas(citas: AgendaBlockCita[]) {
+  return citas.map((c) => ({
+    appointment_id: c.appointment_id,
+    contact_id: c.contact_id,
+    paciente: c.paciente,
+    hora: c.hora,
+    tipo: c.tipo,
+    estado: c.estado_label,
+    anticipo: c.anticipo,
+  }))
+}
+
 async function consultarAgendaDia(
   ctx: AgentToolContext,
   args: { fecha?: string },
@@ -145,8 +201,7 @@ async function consultarAgendaDia(
     : wallPartsInTz(ctx.now, ctx.timezone)
   const dayStart = instantFromLocalDateTime(ctx.timezone, wall, { hour: 0, minute: 0 })
   const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  const fecha = `${wall.year}-${pad(wall.month)}-${pad(wall.day)}`
+  const fecha = `${wall.year}-${pad2(wall.month)}-${pad2(wall.day)}`
 
   const { data: appts, error } = await ctx.db
     .from('appointments')
@@ -169,23 +224,7 @@ async function consultarAgendaDia(
   const nameById = await contactNamesById(ctx, [
     ...new Set(appts.map((a) => a.contact_id as string)),
   ])
-
-  const citas = appts.map((a) => ({
-    appointment_id: a.id as string,
-    contact_id: a.contact_id as string,
-    paciente: nameById.get(a.contact_id as string) ?? 'Sin nombre',
-    hora: formatSlotLabel(new Date(a.starts_at as string), ctx.timezone),
-    tipo: (a.appointment_type as string | null) ?? null,
-    estado: a.status as string,
-    estado_label: APPT_STATUS_LABEL[a.status as string] ?? (a.status as string),
-    anticipo_estado: (a.deposit_status as string) ?? 'no_aplica',
-    anticipo:
-      a.deposit_status === 'pendiente'
-        ? `pendiente${a.deposit_amount != null ? ` (${fmtMoney(a.deposit_amount)})` : ''}`
-        : a.deposit_status === 'pagado'
-          ? 'pagado'
-          : 'no aplica',
-  }))
+  const citas = toBlockCitas(appts as ApptRow[], nameById, ctx.timezone)
 
   events?.onBlock?.({ kind: 'agenda', fecha, citas })
 
@@ -193,16 +232,90 @@ async function consultarAgendaDia(
     ok: true,
     total: citas.length,
     // El modelo sigue viendo la etiqueta legible como "estado".
-    citas: citas.map((c) => ({
-      appointment_id: c.appointment_id,
-      contact_id: c.contact_id,
-      paciente: c.paciente,
-      hora: c.hora,
-      tipo: c.tipo,
-      estado: c.estado_label,
-      anticipo: c.anticipo,
-    })),
+    citas: toModelCitas(citas),
     nota: 'El chat ya muestra estas citas como TARJETA DE AGENDA; no repitas la lista completa en texto — resume y responde lo que te preguntaron.',
+  })
+}
+
+/** Tarjetas de agenda que emite un rango, como máximo (una por día con
+ *  citas; más sería empapelar el chat). */
+const MAX_AGENDA_BLOCKS_RANGO = 7
+
+async function consultarAgendaRango(
+  ctx: AgentToolContext,
+  args: { desde?: string; dias?: number },
+  events?: ConciergeExecEvents,
+): Promise<ToolExecResult> {
+  const raw = typeof args.desde === 'string' ? args.desde.trim() : ''
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  const wall = m
+    ? { year: +m[1], month: +m[2], day: +m[3] }
+    : wallPartsInTz(ctx.now, ctx.timezone)
+  const diasNum = Math.trunc(Number(args.dias))
+  const dias = Number.isFinite(diasNum) && diasNum > 0 ? Math.min(diasNum, 31) : 7
+
+  const rangeStart = instantFromLocalDateTime(ctx.timezone, wall, { hour: 0, minute: 0 })
+  const rangeEnd = new Date(rangeStart.getTime() + dias * 24 * 60 * 60 * 1000)
+  const desde = `${wall.year}-${pad2(wall.month)}-${pad2(wall.day)}`
+  // Último día cubierto (mediodía para esquivar bordes de zona).
+  const hasta = fechaLocal(
+    new Date(rangeEnd.getTime() - 12 * 60 * 60 * 1000),
+    ctx.timezone,
+  )
+
+  const { data: appts, error } = await ctx.db
+    .from('appointments')
+    .select('id, contact_id, starts_at, status, appointment_type, deposit_status, deposit_amount')
+    .eq('account_id', ctx.accountId)
+    .gte('starts_at', rangeStart.toISOString())
+    .lt('starts_at', rangeEnd.toISOString())
+    .order('starts_at', { ascending: true })
+  if (error) return fail(`No pude leer la agenda: ${error.message}`)
+
+  if (!appts || appts.length === 0) {
+    return ok({
+      ok: true,
+      desde,
+      hasta,
+      total: 0,
+      dias: [],
+      nota: `No hay citas agendadas entre ${desde} y ${hasta}.`,
+    })
+  }
+
+  const nameById = await contactNamesById(ctx, [
+    ...new Set(appts.map((a) => a.contact_id as string)),
+  ])
+
+  // Agrupa por día local preservando el orden cronológico del query.
+  const porDia = new Map<string, ApptRow[]>()
+  for (const a of appts as ApptRow[]) {
+    const fecha = fechaLocal(new Date(a.starts_at as string), ctx.timezone)
+    porDia.set(fecha, [...(porDia.get(fecha) ?? []), a])
+  }
+
+  const diasOut: { fecha: string; total: number; citas: ReturnType<typeof toModelCitas> }[] = []
+  let blocksEmitted = 0
+  for (const [fecha, rows] of porDia) {
+    const citas = toBlockCitas(rows, nameById, ctx.timezone)
+    if (blocksEmitted < MAX_AGENDA_BLOCKS_RANGO) {
+      events?.onBlock?.({ kind: 'agenda', fecha, citas })
+      blocksEmitted += 1
+    }
+    diasOut.push({ fecha, total: citas.length, citas: toModelCitas(citas) })
+  }
+
+  return ok({
+    ok: true,
+    desde,
+    hasta,
+    total: appts.length,
+    dias: diasOut,
+    nota:
+      'El chat ya muestra estas citas como tarjetas por día; no repitas la lista completa en texto — resume (totales, pendientes de confirmar, anticipos) y responde exactamente lo que te preguntaron.' +
+      (porDia.size > MAX_AGENDA_BLOCKS_RANGO
+        ? ` Solo los primeros ${MAX_AGENDA_BLOCKS_RANGO} días con citas aparecen como tarjeta.`
+        : ''),
   })
 }
 
@@ -394,6 +507,263 @@ async function buscarPaciente(
   })
 
   return ok({ ok: true, pacientes })
+}
+
+/** Tags (nombres) de un grupo de contactos, agrupadas por contact_id. */
+async function tagsByContact(
+  ctx: AgentToolContext,
+  contactIds: string[],
+): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>()
+  if (contactIds.length === 0) return out
+  const { data: links } = await ctx.db
+    .from('contact_tags')
+    .select('contact_id, tag_id')
+    .in('contact_id', contactIds)
+  if (!links || links.length === 0) return out
+  const { data: tags } = await ctx.db
+    .from('tags')
+    .select('id, name')
+    .eq('account_id', ctx.accountId)
+    .in('id', [...new Set(links.map((l) => l.tag_id as string))])
+  const nameById = new Map((tags ?? []).map((t) => [t.id as string, t.name as string]))
+  for (const l of links) {
+    const name = nameById.get(l.tag_id as string)
+    if (!name) continue
+    const key = l.contact_id as string
+    out.set(key, [...(out.get(key) ?? []), name])
+  }
+  return out
+}
+
+async function verPaciente(
+  ctx: AgentToolContext,
+  args: { contact_id?: string },
+): Promise<ToolExecResult> {
+  const contactId = typeof args.contact_id === 'string' ? args.contact_id.trim() : ''
+  if (!contactId) {
+    return fail('Falta contact_id (usa buscar_paciente o listar_pacientes).')
+  }
+
+  const { data: contact } = await ctx.db
+    .from('contacts')
+    .select('id, name, phone, email, company, created_at')
+    .eq('account_id', ctx.accountId)
+    .eq('id', contactId)
+    .maybeSingle()
+  if (!contact) return fail('Ese contact_id no existe en esta cuenta.')
+
+  const nowIso = ctx.now.toISOString()
+  const [tags, proxRes, pastRes, payRes, dealRes, recRes, convoRes] = await Promise.all([
+    tagsByContact(ctx, [contactId]),
+    ctx.db
+      .from('appointments')
+      .select('id, starts_at, status, appointment_type, deposit_status, deposit_amount, notes')
+      .eq('account_id', ctx.accountId)
+      .eq('contact_id', contactId)
+      .gte('starts_at', nowIso)
+      .order('starts_at', { ascending: true })
+      .limit(10),
+    ctx.db
+      .from('appointments')
+      .select('id, starts_at, status, appointment_type, deposit_status, deposit_amount, notes')
+      .eq('account_id', ctx.accountId)
+      .eq('contact_id', contactId)
+      .lt('starts_at', nowIso)
+      .order('starts_at', { ascending: false })
+      .limit(10),
+    ctx.db
+      .from('payments')
+      .select('id, amount, currency, method, status, concept, receipt_url, created_at')
+      .eq('account_id', ctx.accountId)
+      .eq('contact_id', contactId)
+      .order('created_at', { ascending: false })
+      .limit(20),
+    ctx.db
+      .from('deals')
+      .select('id, title, value, status, stage_id')
+      .eq('account_id', ctx.accountId)
+      .eq('contact_id', contactId),
+    ctx.db
+      .from('patient_records')
+      .select('category, content, created_at')
+      .eq('account_id', ctx.accountId)
+      .eq('contact_id', contactId)
+      .eq('is_active', true)
+      .order('created_at', { ascending: false })
+      .limit(30),
+    ctx.db
+      .from('conversations')
+      .select('id, status, last_message_text, last_message_at')
+      .eq('account_id', ctx.accountId)
+      .eq('contact_id', contactId)
+      .order('last_message_at', { ascending: false })
+      .limit(1),
+  ])
+
+  const mapCita = (a: Record<string, unknown>) => ({
+    appointment_id: a.id as string,
+    cuando: formatSlotLabel(new Date(a.starts_at as string), ctx.timezone),
+    tipo: (a.appointment_type as string | null) ?? null,
+    estado: APPT_STATUS_LABEL[a.status as string] ?? (a.status as string),
+    anticipo:
+      a.deposit_status === 'pendiente'
+        ? `pendiente${a.deposit_amount != null ? ` (${fmtMoney(a.deposit_amount)})` : ''}`
+        : a.deposit_status === 'pagado'
+          ? 'pagado'
+          : 'no aplica',
+    ...(a.notes ? { notas: a.notes as string } : {}),
+  })
+
+  const deals = dealRes.data ?? []
+  const stageIds = [...new Set(deals.map((d) => d.stage_id as string).filter(Boolean))]
+  let stageNameById = new Map<string, string>()
+  if (stageIds.length > 0) {
+    const { data: stages } = await ctx.db
+      .from('pipeline_stages')
+      .select('id, name')
+      .in('id', stageIds)
+    stageNameById = new Map((stages ?? []).map((s) => [s.id as string, s.name as string]))
+  }
+
+  const convo = (convoRes.data ?? [])[0] ?? null
+
+  return ok({
+    ok: true,
+    paciente: {
+      contact_id: contact.id,
+      nombre: contact.name ?? 'Sin nombre',
+      telefono: contact.phone,
+      email: contact.email ?? null,
+      empresa: contact.company ?? null,
+      tags: tags.get(contactId) ?? [],
+      registrado: formatSlotLabel(new Date(contact.created_at as string), ctx.timezone),
+    },
+    citas_proximas: (proxRes.data ?? []).map(mapCita),
+    citas_pasadas: (pastRes.data ?? []).map(mapCita),
+    pagos: (payRes.data ?? []).map((p) => ({
+      payment_id: p.id,
+      monto: fmtMoney(p.amount, (p.currency as string) ?? 'MXN'),
+      metodo: p.method,
+      estado: p.status,
+      concepto: p.concept ?? null,
+      comprobante: p.receipt_url ? 'adjunto' : 'sin comprobante',
+      fecha: formatSlotLabel(new Date(p.created_at as string), ctx.timezone),
+    })),
+    embudo: deals.map((d) => ({
+      deal_id: d.id,
+      titulo: d.title,
+      valor: fmtMoney(d.value),
+      estado: d.status,
+      etapa: stageNameById.get(d.stage_id as string) ?? null,
+    })),
+    expediente: (recRes.data ?? []).map((r) => ({
+      categoria: r.category,
+      dato: r.content,
+      fecha: formatSlotLabel(new Date(r.created_at as string), ctx.timezone),
+    })),
+    conversacion: convo
+      ? {
+          estado: convo.status,
+          ultimo_mensaje: String(convo.last_message_text ?? '').slice(0, 200) || null,
+          ultima_actividad: convo.last_message_at
+            ? formatSlotLabel(new Date(convo.last_message_at as string), ctx.timezone)
+            : null,
+        }
+      : null,
+    nota: 'Este es el perfil completo del paciente. Resume solo lo relevante a lo que te preguntaron; no vacíes todo en texto.',
+  })
+}
+
+async function listarPacientes(
+  ctx: AgentToolContext,
+  args: { buscar?: string; limite?: number },
+): Promise<ToolExecResult> {
+  const limiteNum = Math.trunc(Number(args.limite))
+  const limite = Number.isFinite(limiteNum) && limiteNum > 0 ? Math.min(limiteNum, 50) : 20
+  const buscar = typeof args.buscar === 'string' ? args.buscar.trim() : ''
+
+  let contacts: Record<string, unknown>[]
+  if (buscar) {
+    const [byName, byPhone] = await Promise.all([
+      ctx.db
+        .from('contacts')
+        .select('id, name, phone, email, created_at')
+        .eq('account_id', ctx.accountId)
+        .ilike('name', `%${buscar}%`)
+        .order('created_at', { ascending: false })
+        .limit(limite),
+      ctx.db
+        .from('contacts')
+        .select('id, name, phone, email, created_at')
+        .eq('account_id', ctx.accountId)
+        .ilike('phone', `%${buscar}%`)
+        .order('created_at', { ascending: false })
+        .limit(limite),
+    ])
+    if (byName.error) return fail(`No pude leer los pacientes: ${byName.error.message}`)
+    const seen = new Map<string, Record<string, unknown>>()
+    for (const c of [...(byName.data ?? []), ...(byPhone.data ?? [])]) {
+      seen.set(c.id as string, c)
+    }
+    contacts = [...seen.values()].slice(0, limite)
+  } else {
+    const { data, error } = await ctx.db
+      .from('contacts')
+      .select('id, name, phone, email, created_at')
+      .eq('account_id', ctx.accountId)
+      .order('created_at', { ascending: false })
+      .limit(limite)
+    if (error) return fail(`No pude leer los pacientes: ${error.message}`)
+    contacts = data ?? []
+  }
+
+  if (contacts.length === 0) {
+    return ok({
+      ok: true,
+      pacientes: [],
+      nota: buscar
+        ? `No encontré pacientes que coincidan con "${buscar}".`
+        : 'La cuenta todavía no tiene pacientes registrados.',
+    })
+  }
+
+  const ids = contacts.map((c) => c.id as string)
+  const [tags, apptRes] = await Promise.all([
+    tagsByContact(ctx, ids),
+    ctx.db
+      .from('appointments')
+      .select('contact_id, starts_at, status')
+      .eq('account_id', ctx.accountId)
+      .in('contact_id', ids)
+      .gte('starts_at', ctx.now.toISOString())
+      .order('starts_at', { ascending: true }),
+  ])
+
+  // Próxima cita (no cancelada) por paciente.
+  const nextByContact = new Map<string, string>()
+  for (const a of apptRes.data ?? []) {
+    const key = a.contact_id as string
+    if (nextByContact.has(key) || a.status === 'cancelada') continue
+    nextByContact.set(key, formatSlotLabel(new Date(a.starts_at as string), ctx.timezone))
+  }
+
+  return ok({
+    ok: true,
+    total: contacts.length,
+    pacientes: contacts.map((c) => ({
+      contact_id: c.id,
+      nombre: c.name ?? 'Sin nombre',
+      telefono: c.phone,
+      email: c.email ?? null,
+      tags: tags.get(c.id as string) ?? [],
+      registrado: formatSlotLabel(new Date(c.created_at as string), ctx.timezone),
+      proxima_cita: nextByContact.get(c.id as string) ?? null,
+    })),
+    nota:
+      `Se listan los ${contacts.length} más recientes (tope ${limite}). ` +
+      'Para el perfil completo de uno usa ver_paciente con su contact_id.',
+  })
 }
 
 // ------------------------------------------------------------
@@ -617,12 +987,18 @@ export function createConciergeExecutor(
       switch (name) {
         case 'consultar_agenda_dia':
           return await consultarAgendaDia(ctx, args as never, opts.events)
+        case 'consultar_agenda_rango':
+          return await consultarAgendaRango(ctx, args as never, opts.events)
         case 'consultar_anticipos_pendientes':
           return await consultarAnticiposPendientes(ctx)
         case 'consultar_embudo':
           return await consultarEmbudo(ctx)
         case 'buscar_paciente':
           return await buscarPaciente(ctx, args as never)
+        case 'ver_paciente':
+          return await verPaciente(ctx, args as never)
+        case 'listar_pacientes':
+          return await listarPacientes(ctx, args as never)
         case 'abrir_seccion':
           return abrirSeccion(args as never, opts.events)
         // Estas dos operan solo a escala de cuenta en el ejecutor

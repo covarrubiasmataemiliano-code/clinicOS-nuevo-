@@ -192,7 +192,7 @@ export function Composer({
             <LevelBars level={recordLevel} />
             <span className="nums text-sm text-foreground">{fmtTimer(recordSeconds)}</span>
             <span className="hidden flex-1 truncate text-xs text-muted-foreground sm:block">
-              Escuchando… suelta tu pregunta y acepta para enviar.
+              Escuchando… al quedarte en silencio se envía solo (Esc cancela).
             </span>
             <div className="ml-auto flex items-center gap-1">
               <Button

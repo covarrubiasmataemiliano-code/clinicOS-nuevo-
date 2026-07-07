@@ -36,13 +36,31 @@ export const CONCIERGE_READ_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'consultar_agenda_dia',
     description:
-      'Devuelve las citas agendadas para un día (id de cita, paciente, hora, tipo, estado y anticipo). Úsala para "qué tengo hoy/mañana", "cuántas citas hay el viernes", y SIEMPRE antes de proponer cambios sobre una cita para tener su appointment_id real.',
+      'Devuelve las citas agendadas para UN día (id de cita, paciente, hora, tipo, estado y anticipo). Úsala para "qué tengo hoy/mañana", "cuántas citas hay el viernes", y SIEMPRE antes de proponer cambios sobre una cita para tener su appointment_id real. Para "esta semana" o varios días usa consultar_agenda_rango.',
     input_schema: {
       type: 'object',
       properties: {
         fecha: {
           type: 'string',
           description: 'Fecha en formato YYYY-MM-DD, hora local de la clínica. Omítela para hoy.',
+        },
+      },
+    },
+  },
+  {
+    name: 'consultar_agenda_rango',
+    description:
+      'Devuelve las citas de VARIOS días de corrido, agrupadas por día. Úsala para "las citas de la semana", "qué tengo los próximos días", "cómo viene el mes". NUNCA respondas sobre un rango de días consultando un solo día.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        desde: {
+          type: 'string',
+          description: 'Primer día del rango (YYYY-MM-DD, hora local). Omítelo para empezar hoy.',
+        },
+        dias: {
+          type: 'integer',
+          description: 'Cuántos días cubrir a partir de "desde" (default 7, máx 31).',
         },
       },
     },
@@ -62,7 +80,7 @@ export const CONCIERGE_READ_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'buscar_paciente',
     description:
-      'Busca un paciente/contacto por nombre o teléfono y devuelve su contact_id, datos, citas recientes (con appointment_id) y expediente clínico ligero. Úsala para "qué sabemos de [nombre]" y antes de proponer acciones sobre un paciente.',
+      'Busca un paciente/contacto por nombre o teléfono y devuelve su contact_id, datos, citas recientes (con appointment_id) y expediente clínico ligero. Úsala para "qué sabemos de [nombre]" y antes de proponer acciones sobre un paciente. Para el perfil COMPLETO usa ver_paciente con el contact_id.',
     input_schema: {
       type: 'object',
       properties: {
@@ -72,6 +90,39 @@ export const CONCIERGE_READ_TOOLS: readonly ToolDefinition[] = [
         },
       },
       required: ['query'],
+    },
+  },
+  {
+    name: 'ver_paciente',
+    description:
+      'Devuelve el perfil COMPLETO de un paciente del CRM: datos de contacto, tags, TODAS sus citas (pasadas y futuras), historial de pagos, sus leads en el embudo, expediente clínico completo y el estado de su conversación de WhatsApp. Úsala cuando pidan "toda la información de [paciente]", para preparar una consulta o para organizar/extraer datos de un paciente. Obtén el contact_id con buscar_paciente o listar_pacientes.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        contact_id: {
+          type: 'string',
+          description: 'ID del contacto/paciente.',
+        },
+      },
+      required: ['contact_id'],
+    },
+  },
+  {
+    name: 'listar_pacientes',
+    description:
+      'Devuelve la vista del CRM: pacientes/contactos de la cuenta (contact_id, datos, tags y su próxima cita), los más recientes primero. Úsala para "cuántos pacientes tenemos", "los pacientes nuevos", o para organizar/resumir la cartera de la clínica. Acepta un filtro de texto opcional.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        buscar: {
+          type: 'string',
+          description: 'Filtro opcional por nombre o teléfono (parcial). Omítelo para listar los más recientes.',
+        },
+        limite: {
+          type: 'integer',
+          description: 'Cuántos pacientes devolver (default 20, máx 50).',
+        },
+      },
     },
   },
   {
@@ -117,7 +168,7 @@ export const CONCIERGE_READ_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'abrir_seccion',
     description:
-      'Abre una sección del panel en la pantalla del usuario (navega la vista, no devuelve datos). Úsala cuando el usuario pida VER una pantalla ("ábreme el calendario", "llévame al embudo") o cuando, hablando por voz, convenga mostrar la sección mientras respondes. Para RESPONDER datos usa las herramientas consultar_*; esta solo mueve la vista y saca al usuario del chat.',
+      'Abre una sección del panel en la pantalla del usuario (navega la vista, no devuelve datos). Úsala SIEMPRE que el usuario pida VER, MOSTRAR o ABRIR algo que vive en una pantalla del panel ("muéstrame las citas", "enséñame el CRM", "llévame al embudo"): abre la sección Y en el mismo turno responde con el resumen de los datos (consúltalos con las herramientas consultar_*/listar_*) — tu respuesta se lee en voz alta mientras el usuario mira la pantalla. Para preguntas de datos sin intención de ver una pantalla, responde en el chat sin navegar.',
     input_schema: {
       type: 'object',
       properties: {
@@ -289,9 +340,12 @@ export const CONCIERGE_WRITE_TOOL_NAMES: readonly ConciergeWriteToolName[] = [
 /** Etiqueta de actividad que la UI muestra mientras corre cada tool. */
 export const TOOL_STATUS_LABEL: Record<string, string> = {
   consultar_agenda_dia: 'Consultando agenda…',
+  consultar_agenda_rango: 'Consultando agenda…',
   consultar_anticipos_pendientes: 'Revisando anticipos…',
   consultar_embudo: 'Consultando el embudo…',
   buscar_paciente: 'Buscando paciente…',
+  ver_paciente: 'Abriendo expediente…',
+  listar_pacientes: 'Consultando pacientes…',
   consultar_disponibilidad: 'Buscando huecos libres…',
   consultar_catalogo: 'Consultando catálogo…',
   abrir_seccion: 'Abriendo sección…',

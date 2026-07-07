@@ -88,7 +88,7 @@ Estructura de la página (ver mockup):
 
 ```
 ┌─ Sidebar app ─┬─ Sesiones (260px, colapsable) ─┬─ Chat ──────────────────────┐
-│ Concierge ●   │ [+ Nueva conversación]         │ Header: título · voz-toggle │
+│ Concierge ●   │ [+ Nueva conversación]         │ Header: título de la sesión │
 │ Conversaciones│ Hoy                            │ ┌─────────────────────────┐ │
 │ CRM           │  ● Agenda y reagendado (activa)│ │ transcript max-w-3xl    │ │
 │ Calendario    │  ○ Anticipo Karla Ortiz        │ │  burbujas + bloques     │ │
@@ -131,7 +131,7 @@ Tarjeta `bg-card border rounded-xl shadow-soft` con icono del dominio (calendari
 - Permiso de mic denegado → tooltip explicando cómo habilitarlo; el botón queda con badge de advertencia.
 
 ### 4.7 Voz de respuesta (TTS)
-- **Toggle "Voz" en el header del chat** (persistido por usuario en localStorage): encendido = auto-play de cada respuesta del asistente al terminar (o por frases si se streamea el TTS en F2.5). Apagado = solo el botón ▶ por mensaje.
+- **Sin toggle: la voz se activa sola** en exactamente dos casos — (1) el turno se dictó con el mic (modo conversación: se envía solo, la respuesta se lee en voz alta y se vuelve a escuchar con VAD; Esc/✕ rompen el ciclo), o (2) el agente navegó de sección con `abrir_seccion` (la respuesta se lee aunque el turno fuera tecleado, para escucharla mientras se ve la pantalla). Turnos tecleados sin navegación = solo texto, con botón ▶ por mensaje para reproducir a demanda. *(El toggle "Voz" del header de la primera iteración de F2 se eliminó a favor de estas reglas automáticas.)*
 - Reproductor mínimo: el mensaje que suena muestra ecualizador animado + pausa; barra global no hace falta.
 - Regla de cortesía: nunca auto-reproducir dos mensajes encimados; cola de uno; si el usuario empieza a escribir/grabar, se pausa.
 
@@ -190,9 +190,9 @@ Tarjeta `bg-card border rounded-xl shadow-soft` con icono del dominio (calendari
 4. Auditoría gratis: `assistant_actions` es el log de quién confirmó qué y cuándo (`resolved_by`, `resolved_at`).
 5. Doble seguro contra prompt-injection/proactividad: las mutaciones corren con el **cliente RLS del usuario que confirmó**, jamás con service-role, y `executeConfirmedAction` re-valida el input contra la BD en el momento de ejecutar (el hueco pudo ocuparse entre propuesta y confirmación → `failed` con explicación, nunca doble-book).
 
-### 6.3 Catálogo inicial de tools (12)
+### 6.3 Catálogo de tools (16 tras F2.1)
 
-**Lectura (ejecutan directo — 6):** las 4 internas existentes (`consultar_agenda_dia`, `consultar_anticipos_pendientes`, `consultar_embudo`, `buscar_paciente`) + 2 adaptadas de Sofía a scope de cuenta: `consultar_disponibilidad` (huecos libres — necesaria antes de proponer citas) y `consultar_catalogo` (procedimientos/precios).
+**Lectura (ejecutan directo — 10):** las 4 internas existentes (`consultar_agenda_dia`, `consultar_anticipos_pendientes`, `consultar_embudo`, `buscar_paciente`) + 2 adaptadas de Sofía a scope de cuenta: `consultar_disponibilidad` (huecos libres — necesaria antes de proponer citas) y `consultar_catalogo` (procedimientos/precios) + `abrir_seccion` (navegación autónoma, F2) + 3 de acceso completo al CRM (F2.1): `consultar_agenda_rango` (citas de varios días agrupadas por día — "las citas de la semana"; emite una tarjeta de agenda por día con citas, máx 7), `ver_paciente` (perfil 360°: datos+tags, citas próximas/pasadas, pagos, embudo, expediente completo y estado de la conversación de WhatsApp) y `listar_pacientes` (cartera del CRM con tags y próxima cita, filtro de texto opcional).
 
 **Escritura (propose → confirm — 6):**
 

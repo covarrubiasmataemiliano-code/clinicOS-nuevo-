@@ -4,10 +4,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { toast } from 'sonner';
-import { Plus, Sparkles, Volume2, VolumeX } from 'lucide-react';
+import { Plus, Sparkles } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/hooks/use-auth';
-import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import {
   uploadAccountMedia,
@@ -30,11 +29,13 @@ import { useTts } from './use-tts';
 // Fase 2 — voz y adjuntos:
 //   * Adjuntos: se suben a chat-media al elegirse (chips con estado) y
 //     el turno manda solo las referencias {url, mime, name}.
-//   * Dictado: mic → grabación → /transcribe. Con "Voz" apagada la
-//     transcripción cae al composer (revisar y enviar); con "Voz"
-//     encendida se envía sola y arranca el MODO CONVERSACIÓN: la
-//     respuesta se lee en voz alta y al terminar vuelve a escuchar
-//     (VAD corta en silencio sostenido). Esc o ✕ rompen el ciclo.
+//   * Voz: se activa SOLA en dos casos — (1) el turno se dictó con el
+//     mic (arranca el MODO CONVERSACIÓN: envía, lee la respuesta y
+//     vuelve a escuchar con VAD; Esc o ✕ rompen el ciclo), o (2) el
+//     agente navegó de sección con abrir_seccion (la respuesta se lee
+//     en voz alta aunque el turno fuera tecleado, para escucharla
+//     mientras se ve la pantalla). Los turnos tecleados sin navegación
+//     son solo texto.
 //   * Navegación autónoma: un bloque 'navegacion' en vivo hace
 //     router.push — el agente puede llevar al usuario a la sección.
 // ============================================================
@@ -48,7 +49,6 @@ const ACCEPTED_ATTACHMENT_MIMES = new Set([
 ]);
 /** Silencio sostenido que cierra un turno de voz en modo conversación. */
 const VOICE_SILENCE_STOP_MS = 2000;
-const VOICE_PREF_KEY = 'concierge:voz';
 
 let attachmentSeq = 0;
 
@@ -63,7 +63,6 @@ export function ConciergePage() {
   const [input, setInput] = useState('');
   const [staged, setStaged] = useState<StagedAttachment[]>([]);
   const [voiceState, setVoiceState] = useState<VoiceState>('idle');
-  const [voiceOn, setVoiceOn] = useState(false);
 
   const recorder = useRecorder();
   const tts = useTts();
@@ -78,8 +77,6 @@ export function ConciergePage() {
   // siempre leen el valor vigente, no el del render que los creó.
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
-  const voiceOnRef = useRef(voiceOn);
-  voiceOnRef.current = voiceOn;
   /** true mientras la conversación por voz está encadenada. */
   const voiceLoopRef = useRef(false);
   const sendingRef = useRef(false);
@@ -90,29 +87,6 @@ export function ConciergePage() {
       mountedRef.current = false;
     };
   }, []);
-
-  // Preferencia de voz por usuario (localStorage, como el tema).
-  useEffect(() => {
-    try {
-      setVoiceOn(window.localStorage.getItem(VOICE_PREF_KEY) === '1');
-    } catch {
-      // storage bloqueado — la preferencia simplemente no persiste
-    }
-  }, []);
-
-  const toggleVoice = () => {
-    const next = !voiceOn;
-    setVoiceOn(next);
-    try {
-      window.localStorage.setItem(VOICE_PREF_KEY, next ? '1' : '0');
-    } catch {
-      // ídem
-    }
-    if (!next) {
-      voiceLoopRef.current = false;
-      tts.stop();
-    }
-  };
 
   // setSessions vive dentro del callback de la promesa (no síncrono en
   // el cuerpo del efecto) — mismo criterio que /pipelines.
@@ -241,9 +215,9 @@ export function ConciergePage() {
     }
     void refreshSessions();
 
-    // Voz de respuesta: siempre que "Voz" esté encendida (y para turnos
-    // dictados aunque se haya apagado a media corrida, por cortesía).
-    if (reply && (voiceOnRef.current || opts.via === 'voz')) {
+    // Voz de respuesta: solo en turnos dictados por voz, o cuando el
+    // agente navegó de sección (se escucha mientras se ve la pantalla).
+    if (reply && (opts.via === 'voz' || result.navigated)) {
       tts.speak(reply.id, reply.text, {
         onEnd: () => {
           // Modo conversación: al terminar de hablar, vuelve a escuchar.
@@ -264,8 +238,8 @@ export function ConciergePage() {
     tts.stop(); // barge-in: grabar silencia la voz
     const ok = await recorder.start({
       onAutoStop: () => void acceptRecording(),
-      // VAD solo en modo conversación; el dictado manual se cierra con ✓.
-      silenceStopMs: voiceLoopRef.current ? VOICE_SILENCE_STOP_MS : undefined,
+      // VAD: silencio sostenido cierra el turno (también se puede con ✓).
+      silenceStopMs: VOICE_SILENCE_STOP_MS,
     });
     if (!ok) {
       toast.error('No pude acceder al micrófono. Revisa el permiso del navegador.');
@@ -276,8 +250,9 @@ export function ConciergePage() {
   };
 
   const handleMicStart = () => {
-    // El ciclo de conversación se encadena solo si "Voz" está activa.
-    voiceLoopRef.current = voiceOnRef.current;
+    // Dictar = activar el modo voz: el turno se envía solo y la
+    // conversación se encadena (respuesta hablada → volver a escuchar).
+    voiceLoopRef.current = true;
     void startListening();
   };
 
@@ -388,25 +363,6 @@ export function ConciergePage() {
             </span>
           </div>
           <div className="flex items-center gap-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={toggleVoice}
-              aria-pressed={voiceOn}
-              className={cn('text-muted-foreground', voiceOn && 'text-primary')}
-              title={
-                voiceOn
-                  ? 'Voz activada: leo mis respuestas y el mic encadena la conversación'
-                  : 'Voz desactivada: solo texto'
-              }
-            >
-              {voiceOn ? (
-                <Volume2 className="mr-1 h-4 w-4" />
-              ) : (
-                <VolumeX className="mr-1 h-4 w-4" />
-              )}
-              Voz
-            </Button>
             <Button
               variant="ghost"
               size="sm"
