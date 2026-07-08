@@ -23,6 +23,13 @@ import {
 } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { MetaBadge } from "@/components/shared/status-badge";
 import { useCan } from "@/hooks/use-can";
 import { formatCurrency } from "@/lib/currency";
@@ -36,6 +43,7 @@ import {
   CLINIC_CURRENCY,
   type AppointmentStatus,
   type AppointmentWithRelations,
+  type Doctor,
 } from "@/lib/clinic/types";
 import {
   BanknoteIcon,
@@ -47,13 +55,20 @@ import {
   Phone,
   Stethoscope,
   User,
+  UserRound,
   XCircle,
 } from "lucide-react";
+
+/** Centinela del select de doctor para "sin asignar". */
+const NO_DOCTOR = "none";
 
 interface AppointmentSheetProps {
   appointment: AppointmentWithRelations | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Doctores asignables (perfiles con is_provider). Vacío = no se
+   *  muestra el selector de doctor. */
+  doctors: Doctor[];
   /** Refresca la agenda tras una acción (el sheet queda abierto y se
    *  re-renderiza con la cita actualizada que le pasa el padre). */
   onChanged: () => void;
@@ -63,6 +78,7 @@ export function AppointmentSheet({
   appointment,
   open,
   onOpenChange,
+  doctors,
   onChanged,
 }: AppointmentSheetProps) {
   const supabase = createClient();
@@ -81,6 +97,24 @@ export function AppointmentSheet({
       toast.error("No se pudo actualizar la cita");
     } else {
       toast.success(message);
+      onChanged();
+    }
+    setPending(null);
+  }
+
+  async function updateDoctor(nextDoctorId: string) {
+    if (!appointment) return;
+    const doctorId = nextDoctorId === NO_DOCTOR ? null : nextDoctorId;
+    if (doctorId === appointment.doctor_id) return;
+    setPending("doctor");
+    const { error } = await supabase
+      .from("appointments")
+      .update({ doctor_id: doctorId })
+      .eq("id", appointment.id);
+    if (error) {
+      toast.error("No se pudo reasignar el doctor");
+    } else {
+      toast.success(doctorId ? "Doctor asignado" : "Doctor quitado");
       onChanged();
     }
     setPending(null);
@@ -272,6 +306,52 @@ export function AppointmentSheet({
           </div>
 
           <Separator className="bg-border" />
+
+          {/* Doctor asignado — solo cuando la clínica tiene doctores
+              configurados (perfiles con is_provider). */}
+          {(doctors.length > 0 || appointment.doctor_id) && (
+            <>
+              <Separator className="bg-border" />
+              <div className="space-y-1.5">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Doctor
+                </p>
+                {canAct && doctors.length > 0 ? (
+                  <Select
+                    value={appointment.doctor_id ?? NO_DOCTOR}
+                    onValueChange={(v) => v && updateDoctor(v as string)}
+                  >
+                    <SelectTrigger
+                      className="w-full border-border bg-muted text-foreground"
+                      disabled={pending !== null}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="border-border bg-popover">
+                      <SelectItem value={NO_DOCTOR}>Sin asignar</SelectItem>
+                      {doctors.map((d) => (
+                        <SelectItem key={d.user_id} value={d.user_id}>
+                          {d.full_name || "Doctor sin nombre"}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <div className="flex items-center gap-2.5">
+                    <UserRound className="size-4 shrink-0 text-muted-foreground" />
+                    <p className="text-sm text-foreground">
+                      {doctors.find((d) => d.user_id === appointment.doctor_id)
+                        ?.full_name ?? (
+                        <span className="italic text-muted-foreground">
+                          Sin asignar
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
 
           {/* Anticipo */}
           <div className="space-y-1.5">

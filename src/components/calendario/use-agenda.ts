@@ -19,6 +19,7 @@ import {
 } from "@/lib/clinic/calendar";
 import type {
   AppointmentWithRelations,
+  Doctor,
   Procedure,
   ScheduleBlock,
 } from "@/lib/clinic/types";
@@ -53,6 +54,7 @@ export function useAgenda(rangeStart: Date, rangeEnd: Date) {
   );
   const [blocks, setBlocks] = useState<ScheduleBlock[]>([]);
   const [procedures, setProcedures] = useState<Procedure[]>([]);
+  const [doctors, setDoctors] = useState<Doctor[]>([]);
   const [kpis, setKpis] = useState<AgendaKpis>(EMPTY_KPIS);
   const [loading, setLoading] = useState(true);
 
@@ -158,6 +160,18 @@ export function useAgenda(rangeStart: Date, rangeEnd: Date) {
     if (data) setProcedures(data as Procedure[]);
   }, [supabase]);
 
+  // Doctores asignables = perfiles con is_provider (migración 044). RLS
+  // los limita a la cuenta del usuario. Se usan para asignar, filtrar y
+  // colorear la agenda.
+  const fetchDoctors = useCallback(async () => {
+    const { data } = await supabase
+      .from("profiles")
+      .select("user_id, full_name, provider_color")
+      .eq("is_provider", true)
+      .order("full_name");
+    if (data) setDoctors(data as Doctor[]);
+  }, [supabase]);
+
   useEffect(() => {
     // Los setters corren tras awaits de Supabase, no síncronos en el effect.
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -168,6 +182,11 @@ export function useAgenda(rangeStart: Date, rangeEnd: Date) {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- ídem.
     fetchProcedures();
   }, [fetchProcedures]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- ídem.
+    fetchDoctors();
+  }, [fetchDoctors]);
 
   // ------------------------------------------------------------
   // Realtime: appointments está en supabase_realtime (migración 031).
@@ -202,6 +221,7 @@ export function useAgenda(rangeStart: Date, rangeEnd: Date) {
     appointments,
     blocks,
     procedures,
+    doctors,
     kpis,
     loading,
     refetch: fetchAgenda,

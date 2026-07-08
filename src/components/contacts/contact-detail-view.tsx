@@ -32,6 +32,7 @@ import {
   TemplatePicker,
   type TemplateSendValues,
 } from '@/components/inbox/template-picker';
+import { PatientDocuments } from '@/components/contacts/patient-documents';
 import {
   Sheet,
   SheetContent,
@@ -530,6 +531,12 @@ export function ContactDetailView({
                   Citas
                 </TabsTrigger>
                 <TabsTrigger
+                  value="docs"
+                  className="data-active:bg-muted data-active:text-primary text-muted-foreground"
+                >
+                  Documentos
+                </TabsTrigger>
+                <TabsTrigger
                   value="deals"
                   className="data-active:bg-muted data-active:text-primary text-muted-foreground"
                 >
@@ -809,6 +816,10 @@ export function ContactDetailView({
                     })}
                   </div>
                 )}
+              </TabsContent>
+
+              <TabsContent value="docs" className="flex-1 overflow-y-auto px-4 py-3">
+                {contactId && <PatientDocuments contactId={contactId} />}
               </TabsContent>
 
               <TabsContent value="deals" className="flex-1 overflow-y-auto px-4 py-3">

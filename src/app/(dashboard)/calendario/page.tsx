@@ -19,6 +19,13 @@ import {
   Lock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { useAgenda } from "@/components/calendario/use-agenda";
 import { KpiStrip } from "@/components/calendario/kpi-strip";
@@ -45,6 +52,8 @@ export default function CalendarioPage() {
   const [newOpen, setNewOpen] = useState(false);
   const [blockOpen, setBlockOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Filtro por doctor: "all" = todos, "unassigned" = sin doctor, o un user_id.
+  const [doctorFilter, setDoctorFilter] = useState<string>("all");
 
   // Días visibles + rango [inicio, fin) que pide el hook.
   const { days, rangeStart, rangeEnd } = useMemo(() => {
@@ -60,8 +69,23 @@ export default function CalendarioPage() {
     };
   }, [view, anchor]);
 
-  const { appointments, blocks, procedures, kpis, loading, refetch } =
+  const { appointments, blocks, procedures, doctors, kpis, loading, refetch } =
     useAgenda(rangeStart, rangeEnd);
+
+  // Índice de doctores por user_id, para colorear/etiquetar la rejilla.
+  const doctorsById = useMemo(
+    () => new Map(doctors.map((d) => [d.user_id, d])),
+    [doctors],
+  );
+
+  // Citas visibles según el filtro de doctor. La ficha lateral se busca
+  // sobre la lista completa para que no desaparezca al filtrar.
+  const visibleAppointments = useMemo(() => {
+    if (doctorFilter === "all") return appointments;
+    if (doctorFilter === "unassigned")
+      return appointments.filter((a) => !a.doctor_id);
+    return appointments.filter((a) => a.doctor_id === doctorFilter);
+  }, [appointments, doctorFilter]);
 
   const selected =
     appointments.find((a) => a.id === selectedId) ?? null;
@@ -150,9 +174,34 @@ export default function CalendarioPage() {
           </Button>
         </div>
 
-        {/* Control segmentado semana/día — pista gris + pastilla activa,
-            el estilo homologado del legacy (docs/legacy-clinicos/ui/segment.ts). */}
-        <div className="flex h-8 items-center gap-0.5 rounded-lg bg-muted p-[3px]">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Filtro por doctor — solo si la clínica configuró doctores. */}
+          {doctors.length > 0 && (
+            <Select
+              value={doctorFilter}
+              onValueChange={(v) => v && setDoctorFilter(v as string)}
+            >
+              <SelectTrigger
+                size="sm"
+                className="h-8 w-40 border-border bg-muted text-foreground"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="border-border bg-popover">
+                <SelectItem value="all">Todos los doctores</SelectItem>
+                <SelectItem value="unassigned">Sin asignar</SelectItem>
+                {doctors.map((d) => (
+                  <SelectItem key={d.user_id} value={d.user_id}>
+                    {d.full_name || "Doctor sin nombre"}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+
+          {/* Control segmentado semana/día — pista gris + pastilla activa,
+              el estilo homologado del legacy (docs/legacy-clinicos/ui/segment.ts). */}
+          <div className="flex h-8 items-center gap-0.5 rounded-lg bg-muted p-[3px]">
           {(["semana", "dia"] as const).map((mode) => (
             <button
               key={mode}
@@ -168,6 +217,7 @@ export default function CalendarioPage() {
               {mode === "semana" ? "Semana" : "Día"}
             </button>
           ))}
+          </div>
         </div>
       </div>
 
@@ -175,9 +225,10 @@ export default function CalendarioPage() {
       <div className="min-h-0 flex-1 animate-fade-up overflow-hidden rounded-xl border border-border bg-card shadow-soft">
         <CalendarGrid
           days={days}
-          appointments={appointments}
+          appointments={visibleAppointments}
           blocks={blocks}
           now={now}
+          doctorsById={doctorsById}
           onSelectAppointment={setSelectedId}
           onSelectDay={(day) => {
             setView("dia");
@@ -191,6 +242,7 @@ export default function CalendarioPage() {
         open={newOpen}
         onOpenChange={setNewOpen}
         procedures={procedures}
+        doctors={doctors}
         defaultDate={days[0]}
         onCreated={refetch}
       />
@@ -203,6 +255,7 @@ export default function CalendarioPage() {
       <AppointmentSheet
         appointment={selected}
         open={selectedId !== null}
+        doctors={doctors}
         onOpenChange={(o) => {
           if (!o) setSelectedId(null);
         }}

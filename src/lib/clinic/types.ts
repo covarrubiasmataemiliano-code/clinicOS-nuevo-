@@ -103,10 +103,26 @@ export interface Appointment {
   starts_at: string;
   ends_at: string;
   notes: string | null;
+  /** Doctor asignado (auth.users.id). NULL = sin asignar (clínica de un
+   *  solo doctor, o cita del agente que no eligió doctor). */
+  doctor_id: string | null;
   /** NULL = creada por el agente IA (service-role). */
   created_by: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * Doctor asignable = perfil con `is_provider = true` (migración 044).
+ * "Doctor = usuario del panel": la identidad vive en `profiles`; aquí
+ * solo se hidrata lo que la agenda necesita para asignar y colorear.
+ */
+export interface Doctor {
+  /** auth.users.id — lo que guarda `appointments.doctor_id`. */
+  user_id: string;
+  full_name: string | null;
+  /** Color hex '#RRGGBB' para la rejilla; NULL = usa el tono por defecto. */
+  provider_color: string | null;
 }
 
 export interface Payment {

@@ -41,11 +41,15 @@ import {
   CLINIC_CURRENCY,
   type AppointmentContact,
   type AppointmentType,
+  type Doctor,
   type Procedure,
 } from "@/lib/clinic/types";
 
 /** Valor centinela del select para "cita sin procedimiento del catálogo". */
 const NO_PROCEDURE = "none";
+
+/** Valor centinela del select para "cita sin doctor asignado". */
+const NO_DOCTOR = "none";
 
 const TYPE_OPTIONS = Object.entries(APPOINTMENT_TYPE_LABEL) as [
   AppointmentType,
@@ -56,6 +60,9 @@ interface NewAppointmentDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   procedures: Procedure[];
+  /** Doctores asignables (perfiles con is_provider). Vacío = clínica de
+   *  un solo doctor: el selector no se muestra. */
+  doctors: Doctor[];
   /** Día precargado en el formulario (el día visible del calendario). */
   defaultDate: Date;
   onCreated: () => void;
@@ -65,6 +72,7 @@ export function NewAppointmentDialog({
   open,
   onOpenChange,
   procedures,
+  doctors,
   defaultDate,
   onCreated,
 }: NewAppointmentDialogProps) {
@@ -73,6 +81,7 @@ export function NewAppointmentDialog({
 
   const [contact, setContact] = useState<AppointmentContact | null>(null);
   const [procedureId, setProcedureId] = useState<string>(NO_PROCEDURE);
+  const [doctorId, setDoctorId] = useState<string>(NO_DOCTOR);
   const [type, setType] = useState<AppointmentType>("valoracion");
   const [date, setDate] = useState("");
   const [time, setTime] = useState("10:00");
@@ -85,6 +94,7 @@ export function NewAppointmentDialog({
     if (open) {
       setContact(null);
       setProcedureId(NO_PROCEDURE);
+      setDoctorId(NO_DOCTOR);
       setType("valoracion");
       setDate(toDateInputValue(defaultDate));
       setTime("10:00");
@@ -148,6 +158,7 @@ export function NewAppointmentDialog({
         account_id: accountId,
         contact_id: contact.id,
         procedure_id: procedure?.id ?? null,
+        doctor_id: doctorId === NO_DOCTOR ? null : doctorId,
         appointment_type: type,
         // Regla de oro: con anticipo requerido la cita espera el pago.
         status: requiresDeposit ? "pendiente" : "confirmada",
@@ -225,6 +236,37 @@ export function NewAppointmentDialog({
               </p>
             )}
           </div>
+
+          {doctors.length > 0 && (
+            <div className="space-y-2">
+              <Label className="text-muted-foreground">Doctor</Label>
+              <Select
+                items={{
+                  [NO_DOCTOR]: "Sin asignar",
+                  ...Object.fromEntries(
+                    doctors.map((d) => [
+                      d.user_id,
+                      d.full_name || "Doctor sin nombre",
+                    ]),
+                  ),
+                }}
+                value={doctorId}
+                onValueChange={(v) => v && setDoctorId(v as string)}
+              >
+                <SelectTrigger className="w-full border-border bg-muted text-foreground">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="border-border bg-popover">
+                  <SelectItem value={NO_DOCTOR}>Sin asignar</SelectItem>
+                  {doctors.map((d) => (
+                    <SelectItem key={d.user_id} value={d.user_id}>
+                      {d.full_name || "Doctor sin nombre"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
 
           <div className="space-y-2">
             <Label className="text-muted-foreground">Tipo de cita</Label>

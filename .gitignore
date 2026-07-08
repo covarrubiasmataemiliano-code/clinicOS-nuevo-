@@ -47,3 +47,7 @@ next-env.d.ts
 Clinica_Oranza.md
 informacion_ventas_agentes.md
 conversacion-*.json
+ventas/
+
+# herramientas locales del asistente (planes, memoria, ajustes)
+.claude/

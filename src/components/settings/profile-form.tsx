@@ -9,6 +9,7 @@ import { useAuth } from '@/hooks/use-auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import {
   Avatar,
   AvatarFallback,
@@ -16,6 +17,9 @@ import {
 } from '@/components/ui/avatar';
 import { Card, CardContent } from '@/components/ui/card';
 import { SettingsPanelHead } from './settings-panel-head';
+
+/** Color por defecto de la agenda al marcarse como doctor (petróleo). */
+const DEFAULT_PROVIDER_COLOR = '#2F6F6A';
 
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 const ALLOWED_MIME = new Set([
@@ -43,12 +47,43 @@ export function ProfileForm() {
   const [saving, setSaving] = useState(false);
   const [emailChangePending, setEmailChangePending] = useState(false);
 
+  // Doctor (migración 044): is_provider marca al perfil como asignable en
+  // la agenda; provider_color lo colorea. No vienen en useAuth().profile,
+  // así que se cargan directo de la fila propia (RLS: uno edita la suya).
+  const [isProvider, setIsProvider] = useState(false);
+  const [providerColor, setProviderColor] = useState<string | null>(null);
+  const [initialProvider, setInitialProvider] = useState(false);
+  const [initialColor, setInitialColor] = useState<string | null>(null);
+
   // Seed form state once the profile loads.
   useEffect(() => {
     if (!profile) return;
     setFullName(profile.full_name ?? '');
     setEmail(profile.email ?? '');
   }, [profile]);
+
+  // Carga los campos de doctor de la fila propia (no están en useAuth).
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    void (async () => {
+      const { data } = await supabase
+        .from('profiles')
+        .select('is_provider, provider_color')
+        .eq('user_id', user.id)
+        .maybeSingle();
+      if (cancelled || !data) return;
+      setIsProvider(!!data.is_provider);
+      setProviderColor((data.provider_color as string | null) ?? null);
+      setInitialProvider(!!data.is_provider);
+      setInitialColor((data.provider_color as string | null) ?? null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user, supabase]);
+
+  const effectiveColor = providerColor ?? DEFAULT_PROVIDER_COLOR;
 
   // Cleanup object URLs to avoid leaks.
   useEffect(() => {
@@ -137,17 +172,24 @@ export function ProfileForm() {
         nextAvatarUrl = null;
       }
 
-      // Persist name + avatar to profiles.
+      // Persist name + avatar + doctor a profiles. provider_color solo
+      // se guarda si el perfil es doctor; al desmarcar se limpia.
+      const nextColor = isProvider ? effectiveColor : null;
       const { error: updateError } = await supabase
         .from('profiles')
         .update({
           full_name: trimmedName,
           avatar_url: nextAvatarUrl,
+          is_provider: isProvider,
+          provider_color: nextColor,
         })
         .eq('user_id', user.id);
       if (updateError) {
         throw new Error(`Save failed: ${updateError.message}`);
       }
+      setInitialProvider(isProvider);
+      setInitialColor(nextColor);
+      setProviderColor(nextColor);
 
       // Email change goes through Supabase Auth, which emails a
       // confirmation to both the old and new addresses. We don't
@@ -194,7 +236,10 @@ export function ProfileForm() {
     (fullName.trim() !== (profile.full_name ?? '') ||
       email.trim().toLowerCase() !== (profile.email ?? '').toLowerCase() ||
       pendingAvatar !== null ||
-      removeAvatar);
+      removeAvatar ||
+      isProvider !== initialProvider ||
+      (isProvider &&
+        effectiveColor !== (initialColor ?? DEFAULT_PROVIDER_COLOR)));
 
   const joined = user?.created_at
     ? new Date(user.created_at).toLocaleDateString(undefined, {
@@ -297,6 +342,41 @@ export function ProfileForm() {
                   change takes effect.
                 </span>
               </p>
+            )}
+          </div>
+
+          {/* Doctor / agenda (migración 044) */}
+          <div className="space-y-3 rounded-lg border border-border p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-sm font-medium text-foreground">
+                  Soy doctor(a)
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Aparezco como asignable en el calendario. Mis citas se
+                  colorean con el tono que elija.
+                </p>
+              </div>
+              <Switch
+                checked={isProvider}
+                onCheckedChange={setIsProvider}
+                disabled={saving}
+              />
+            </div>
+            {isProvider && (
+              <div className="flex items-center gap-3">
+                <input
+                  type="color"
+                  aria-label="Color de agenda"
+                  value={effectiveColor}
+                  onChange={(e) => setProviderColor(e.target.value)}
+                  disabled={saving}
+                  className="h-8 w-12 cursor-pointer rounded border border-border bg-transparent"
+                />
+                <span className="nums text-xs text-muted-foreground">
+                  {effectiveColor.toUpperCase()}
+                </span>
+              </div>
             )}
           </div>
 

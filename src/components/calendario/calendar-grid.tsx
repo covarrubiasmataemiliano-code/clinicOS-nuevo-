@@ -21,6 +21,7 @@ import {
 import type {
   AppointmentStatus,
   AppointmentWithRelations,
+  Doctor,
   ScheduleBlock,
 } from "@/lib/clinic/types";
 
@@ -73,6 +74,8 @@ interface CalendarGridProps {
   appointments: AppointmentWithRelations[];
   blocks: ScheduleBlock[];
   now: Date;
+  /** Doctor por user_id, para colorear/etiquetar la cita por doctor. */
+  doctorsById?: Map<string, Doctor>;
   onSelectAppointment: (id: string) => void;
   /** Click en el encabezado de un día (la vista semana salta a día). */
   onSelectDay?: (day: Date) => void;
@@ -83,6 +86,7 @@ export function CalendarGrid({
   appointments,
   blocks,
   now,
+  doctorsById,
   onSelectAppointment,
   onSelectDay,
 }: CalendarGridProps) {
@@ -150,6 +154,7 @@ export function CalendarGrid({
               appointments={appointments}
               blocks={blocks}
               now={now}
+              doctorsById={doctorsById}
               onSelectAppointment={onSelectAppointment}
             />
           ))}
@@ -168,12 +173,14 @@ function DayColumn({
   appointments,
   blocks,
   now,
+  doctorsById,
   onSelectAppointment,
 }: {
   day: Date;
   appointments: AppointmentWithRelations[];
   blocks: ScheduleBlock[];
   now: Date;
+  doctorsById?: Map<string, Doctor>;
   onSelectAppointment: (id: string) => void;
 }) {
   const labels = hourLabels();
@@ -263,6 +270,17 @@ function DayColumn({
         const style = BLOCK_STYLES[appointment.status];
         const width = 100 / slot.columns;
 
+        // Doctor asignado: si tiene color propio, la barra izquierda lo
+        // usa (mientras la cita esté activa; canceladas/no-asistió quedan
+        // en gris tachado, sin sobrescribir). El nombre corto va en el
+        // subtítulo para distinguir doctores de un vistazo.
+        const doctor = appointment.doctor_id
+          ? doctorsById?.get(appointment.doctor_id)
+          : undefined;
+        const doctorFirstName = doctor?.full_name?.trim().split(/\s+/)[0];
+        const useDoctorColor =
+          !style.struck && !!doctor?.provider_color;
+
         return (
           <button
             key={appointment.id}
@@ -279,7 +297,18 @@ function DayColumn({
               width: `calc(${width}% - 4px)`,
             }}
           >
-            <span aria-hidden className={cn("w-1 shrink-0 rounded-full", style.bar)} />
+            <span
+              aria-hidden
+              className={cn(
+                "w-1 shrink-0 rounded-full",
+                !useDoctorColor && style.bar,
+              )}
+              style={
+                useDoctorColor
+                  ? { backgroundColor: doctor!.provider_color! }
+                  : undefined
+              }
+            />
             <span className="min-w-0 flex-1 py-0.5 pr-1">
               <span
                 className={cn(
@@ -299,6 +328,7 @@ function DayColumn({
               >
                 {formatTime(new Date(appointment.starts_at))}
                 {appointment.procedure ? ` · ${appointment.procedure.name}` : ""}
+                {doctorFirstName ? ` · ${doctorFirstName}` : ""}
               </span>
             </span>
           </button>
