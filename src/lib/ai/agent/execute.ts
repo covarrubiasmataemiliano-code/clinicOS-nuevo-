@@ -23,6 +23,7 @@ import {
 } from './tools'
 import {
   computeAvailableSlots,
+  type AvailabilitySlot,
   type BusyInterval,
   type ClinicHoursRow,
 } from './availability'
@@ -471,26 +472,71 @@ async function consultarDisponibilidad(
     const proc = await loadProcedure(ctx, input.procedure_id)
     if (proc) duration = proc.duration_minutes
   }
-  if (!duration) duration = 30 // valoración corta por defecto
+  if (!duration) {
+    // La MISMA duración que usará agendar_cita sin procedure_id (la
+    // valoración del catálogo): consultando con 30 y apartando con 60,
+    // los huecos del final del día se ofrecían y luego "no cabían".
+    const valoracion = await findValoracionProcedure(ctx)
+    duration = valoracion?.duration_minutes ?? 30
+  }
 
   const days = Math.min(Math.max(input.dias ?? 7, 1), 30)
   const from = parseFromDate(input.desde, ctx.timezone, ctx.now)
-  const busy = await loadBusy(ctx, from)
 
-  const slots = computeAvailableSlots({
+  // La cita activa del PROPIO paciente no le bloquea la agenda:
+  // agendar_cita siempre la reagenda (una sola cita viva). Sin esta
+  // exclusión, el horario que él mismo apartó "desaparecía" de los
+  // huecos y el agente le decía "ese horario ya no está disponible",
+  // re-ofreciendo horarios corridos 30-60 min en un bucle sin salida.
+  const existing = await findActiveAppointment(ctx)
+  const busy = await loadBusy(ctx, from, existing?.id)
+
+  const all = computeAvailableSlots({
     timezone: ctx.timezone,
     hours,
     busy,
     durationMinutes: duration,
     from,
     days,
-    limit: 8,
+    limit: 64,
   })
+
+  // Hasta 4 huecos por día, repartidos a lo largo del día (primero y
+  // último incluidos). Con un tope plano de 8, un día completo llenaba
+  // la lista y el modelo nunca veía el resto de la semana: los días
+  // siguientes los ofrecía de memoria.
+  const byDay = new Map<string, AvailabilitySlot[]>()
+  for (const s of all) {
+    const p = wallPartsInTz(s.startsAt, ctx.timezone)
+    const key = `${p.year}-${p.month}-${p.day}`
+    const list = byDay.get(key) ?? []
+    list.push(s)
+    byDay.set(key, list)
+  }
+  const slots: AvailabilitySlot[] = []
+  for (const list of byDay.values()) {
+    const take = Math.min(4, list.length)
+    const picked = new Set<number>()
+    for (let i = 0; i < take; i++) {
+      picked.add(Math.round((i * (list.length - 1)) / Math.max(take - 1, 1)))
+    }
+    for (const idx of [...picked].sort((a, b) => a - b)) slots.push(list[idx])
+    if (slots.length >= 16) break
+  }
 
   return ok({
     ok: true,
     duracion_minutos: duration,
-    huecos: slots.map((s) => ({
+    ...(existing
+      ? {
+          cita_actual_del_paciente: {
+            inicio: existing.starts_at,
+            etiqueta: formatSlotLabel(new Date(existing.starts_at), ctx.timezone),
+            nota: 'Estos huecos ya la descuentan: si aparta otro horario con agendar_cita, su cita se MUEVE (no se duplica ni le estorba).',
+          },
+        }
+      : {}),
+    huecos: slots.slice(0, 16).map((s) => ({
       inicio: s.startsAt.toISOString(),
       etiqueta: formatSlotLabel(s.startsAt, ctx.timezone),
     })),
@@ -759,7 +805,20 @@ async function agendarCita(
   if (input.procedure_id && !proc) {
     return fail('Ese procedure_id no existe. Consulta el catálogo primero.')
   }
-  const duration = proc?.duration_minutes ?? 60
+
+  const tipo = APPOINTMENT_TYPES.includes(input.tipo as never)
+    ? input.tipo
+    : 'valoracion'
+
+  // Sin procedure_id, la duración sale de la valoración del catálogo —
+  // la MISMA que usa consultar_disponibilidad. Con 60 fijos, un hueco
+  // ofrecido al final del día no cabía al apartar, y la cita apartada
+  // bloqueaba dos huecos de 30 en la siguiente consulta.
+  const valoracion =
+    !proc && (tipo === 'valoracion' || tipo === 'valoracion_virtual')
+      ? await findValoracionProcedure(ctx)
+      : null
+  const duration = proc?.duration_minutes ?? valoracion?.duration_minutes ?? 30
   const end = new Date(start.getTime() + duration * 60 * 1000)
 
   const hours = await loadClinicHours(ctx)
@@ -776,12 +835,29 @@ async function agendarCita(
     (b) => start.getTime() < b.endsAt.getTime() && b.startsAt.getTime() < end.getTime(),
   )
   if (clash) {
-    return fail('Ese hueco ya no está libre. Vuelve a consultar_disponibilidad.')
+    // Alternativas en el MISMO resultado: sin ellas, el modelo decía
+    // "ese horario no está disponible", volvía a consultar y re-ofrecía
+    // horarios corridos — el bucle que impedía cerrar la cita.
+    const alternativas = computeAvailableSlots({
+      timezone: ctx.timezone,
+      hours,
+      busy,
+      durationMinutes: duration,
+      from: ctx.now,
+      days: 7,
+      limit: 6,
+    })
+    return ok({
+      ok: false,
+      error: 'Ese hueco ya está ocupado por otra cita.',
+      huecos_alternativos: alternativas.map((s) => ({
+        inicio: s.startsAt.toISOString(),
+        etiqueta: formatSlotLabel(s.startsAt, ctx.timezone),
+      })),
+      instruccion_para_paciente:
+        'Dile con calidez que ese horario acaba de ocuparse y ofrécele máximo dos de los huecos_alternativos. No repitas horarios que ya rechazó.',
+    })
   }
-
-  const tipo = APPOINTMENT_TYPES.includes(input.tipo as never)
-    ? input.tipo
-    : 'valoracion'
 
   // Regla de oro del anticipo: toda VALORACIÓN se aparta con anticipo.
   // Si el procedimiento de interés no define uno (o no se pasó
@@ -795,11 +871,11 @@ async function agendarCita(
     depositAmount == null &&
     (tipo === 'valoracion' || tipo === 'valoracion_virtual')
   ) {
-    const valoracion = await findValoracionProcedure(ctx)
-    if (valoracion) {
-      depositAmount = num(valoracion.deposit_amount)
-      depositCurrency = valoracion.currency ?? 'MXN'
-      valoracionRef = valoracion.name
+    const val = valoracion ?? (await findValoracionProcedure(ctx))
+    if (val) {
+      depositAmount = num(val.deposit_amount)
+      depositCurrency = val.currency ?? 'MXN'
+      valoracionRef = val.name
     }
   }
   const depositStatus = depositAmount != null ? 'pendiente' : 'no_aplica'

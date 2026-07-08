@@ -551,6 +551,24 @@ async function processZernioOutboundEcho(payload: ZernioWebhookEvent): Promise<v
       .limit(1)
       .maybeSingle()
     if (recentBot) return
+
+    // El MISMO desfase de ids aplica a los envíos manuales del panel
+    // (persisten su fila con el id que devolvió el send; el eco trae el
+    // wamid), así que cada mensaje del equipo quedaba doble. Ventana
+    // corta: el eco llega segundos después del envío, y un humano SÍ
+    // puede repetir el mismo texto legítimamente más tarde (por eso no
+    // se reutiliza la ventana de 5 min del bot).
+    const agentWindowIso = new Date(Date.now() - 90_000).toISOString()
+    const { data: recentAgent } = await db
+      .from('messages')
+      .select('id')
+      .eq('conversation_id', conversation.id)
+      .eq('sender_type', 'agent')
+      .eq('content_text', mapped.contentText)
+      .gte('created_at', agentWindowIso)
+      .limit(1)
+      .maybeSingle()
+    if (recentAgent) return
   }
 
   // Mismo re-hospedaje que el camino inbound: el eco puede traer un

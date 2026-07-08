@@ -297,6 +297,41 @@ describe('processZernioOutboundEcho — dedupe contra envíos del bot', () => {
     expect(inserted[0].row.content_text).toBe('Aquí el doctor, nos vemos mañana')
   })
 
+  it('descarta el eco de un envío manual del panel (fila agent reciente, mismo texto, otro id)', async () => {
+    // Mismo desfase de ids que el bot: el panel guarda su fila con el
+    // id que devolvió el send, el eco trae el wamid → cada mensaje del
+    // equipo quedaba doble ("pago aprobado" ×2 en el panel).
+    h.store.messages = [
+      {
+        id: 'm-agent',
+        conversation_id: 'conv-1',
+        sender_type: 'agent',
+        content_text: 'pago aprobado',
+        message_id: 'zernio-internal-999',
+        created_at: new Date().toISOString(),
+      },
+    ]
+    await processZernioEvent(sentEvent({ text: 'pago aprobado' }))
+    expect(h.inserts.filter((i) => i.table === 'messages')).toHaveLength(0)
+  })
+
+  it('sí persiste un texto agent repetido fuera de la ventana (repetición humana legítima)', async () => {
+    h.store.messages = [
+      {
+        id: 'm-agent-viejo',
+        conversation_id: 'conv-1',
+        sender_type: 'agent',
+        content_text: 'pago aprobado',
+        message_id: 'zernio-internal-999',
+        created_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+      },
+    ]
+    await processZernioEvent(sentEvent({ text: 'pago aprobado' }))
+    const inserted = h.inserts.filter((i) => i.table === 'messages')
+    expect(inserted).toHaveLength(1)
+    expect(inserted[0].row.sender_type).toBe('agent')
+  })
+
   it('sigue deduplicando por message_id cuando los ids sí coinciden', async () => {
     h.store.messages = [
       {

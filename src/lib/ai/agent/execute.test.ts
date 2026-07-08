@@ -260,8 +260,71 @@ describe('executeClinicalTool', () => {
     const etiquetas = out.huecos.map((h: { inicio: string }) => h.inicio)
     // El hueco de las 11:00 (17:00Z) está ocupado.
     expect(etiquetas).not.toContain('2026-07-08T17:00:00.000Z')
-    // Pero las 10:30 (16:30Z) sí está libre.
-    expect(etiquetas).toContain('2026-07-08T16:30:00.000Z')
+    // Pero el día sigue ofreciendo huecos libres (el primero: 10:00).
+    expect(etiquetas).toContain('2026-07-08T16:00:00.000Z')
+  })
+
+  it('consultar_disponibilidad NO descuenta la cita activa del propio paciente (agendar_cita la mueve)', async () => {
+    const db = fakeDb({
+      clinic_hours: HOURS,
+      appointments: [
+        {
+          id: 'a-mia',
+          account_id: ACCOUNT,
+          contact_id: CONTACT,
+          status: 'pendiente',
+          starts_at: '2026-07-08T17:00:00Z', // 11:00 CDMX — su propia cita
+          ends_at: '2026-07-08T17:30:00Z',
+        },
+      ],
+    })
+    const res = await executeClinicalTool(
+      'consultar_disponibilidad',
+      { duracion_minutos: 30, dias: 1 },
+      ctxWith(db),
+    )
+    const out = JSON.parse(res.content)
+    expect(out.ok).toBe(true)
+    // Sin la exclusión, el horario que él mismo apartó "desaparecía" y
+    // el agente le decía "ese horario ya no está disponible" en bucle.
+    const inicios = out.huecos.map((h: { inicio: string }) => h.inicio)
+    expect(inicios).toContain('2026-07-08T17:00:00.000Z')
+    expect(out.cita_actual_del_paciente.inicio).toBe('2026-07-08T17:00:00Z')
+  })
+
+  it('consultar_disponibilidad sin duración usa la de la valoración (la misma que agendar_cita)', async () => {
+    const db = fakeDb({
+      clinic_hours: HOURS,
+      procedures: [{ ...PROC, duration_minutes: 60 }],
+    })
+    const res = await executeClinicalTool(
+      'consultar_disponibilidad',
+      { dias: 1 },
+      ctxWith(db),
+    )
+    const out = JSON.parse(res.content)
+    expect(out.duracion_minutos).toBe(60)
+    // Con 60 min, 13:30 (19:30Z) ya no cabe antes del cierre de 14:00;
+    // el último hueco agendable es 13:00 (19:00Z).
+    const inicios = out.huecos.map((h: { inicio: string }) => h.inicio)
+    expect(inicios).not.toContain('2026-07-08T19:30:00.000Z')
+    expect(inicios).toContain('2026-07-08T19:00:00.000Z')
+  })
+
+  it('consultar_disponibilidad reparte los huecos entre varios días (máx 4 por día)', async () => {
+    const db = fakeDb({ clinic_hours: HOURS }) // solo miércoles
+    const res = await executeClinicalTool(
+      'consultar_disponibilidad',
+      { duracion_minutos: 30, dias: 8 },
+      ctxWith(db),
+    )
+    const out = JSON.parse(res.content)
+    const inicios = out.huecos.map((h: { inicio: string }) => h.inicio)
+    // Antes, con tope plano, el primer día llenaba la lista y el modelo
+    // ofrecía los días siguientes de memoria (inventados).
+    expect(inicios.some((i: string) => i.startsWith('2026-07-08'))).toBe(true)
+    expect(inicios.some((i: string) => i.startsWith('2026-07-15'))).toBe(true)
+    expect(inicios.filter((i: string) => i.startsWith('2026-07-08')).length).toBeLessThanOrEqual(4)
   })
 
   it('agendar_cita crea la cita en pendiente, sin created_by, y notifica', async () => {
@@ -314,6 +377,51 @@ describe('executeClinicalTool', () => {
     expect(out.reagendada).toBe(true)
     expect(db.store.appointments).toHaveLength(1) // no segunda cita
     expect(db.store.appointments[0].starts_at).toBe('2026-07-08T19:00:00.000Z')
+  })
+
+  it('agendar_cita con el hueco ocupado devuelve alternativas en el MISMO resultado', async () => {
+    const db = fakeDb({
+      clinic_hours: HOURS,
+      procedures: [PROC],
+      appointments: [
+        {
+          id: 'a-otro',
+          account_id: ACCOUNT,
+          contact_id: 'otro',
+          status: 'confirmada',
+          starts_at: '2026-07-08T18:00:00Z', // 12:00 CDMX
+          ends_at: '2026-07-08T18:30:00Z',
+        },
+      ],
+    })
+    const res = await executeClinicalTool(
+      'agendar_cita',
+      { inicio: '2026-07-08T12:00', procedure_id: 'proc-1' },
+      ctxWith(db),
+    )
+    const out = JSON.parse(res.content)
+    expect(out.ok).toBe(false)
+    // Sin alternativas, el modelo re-consultaba y re-ofrecía horarios
+    // corridos 30-60 min — el bucle que impedía cerrar la cita.
+    expect(out.huecos_alternativos.length).toBeGreaterThan(0)
+    const inicios = out.huecos_alternativos.map((h: { inicio: string }) => h.inicio)
+    expect(inicios).not.toContain('2026-07-08T18:00:00.000Z')
+    // No creó ni movió ninguna cita.
+    expect(db.store.appointments).toHaveLength(1)
+  })
+
+  it('agendar_cita sin procedure_id usa la duración de la valoración (el último hueco del día sí cabe)', async () => {
+    const db = fakeDb({ clinic_hours: HOURS, procedures: [PROC] }) // valoración de 30 min
+    const res = await executeClinicalTool(
+      'agendar_cita',
+      { inicio: '2026-07-08T13:30' }, // 13:30 + 30 = 14:00, el cierre exacto
+      ctxWith(db),
+    )
+    const out = JSON.parse(res.content)
+    // Con los 60 min fijos de antes, este hueco (ofrecido por
+    // consultar_disponibilidad) se rechazaba como "fuera de horario".
+    expect(out.ok).toBe(true)
+    expect(db.store.appointments[0].ends_at).toBe('2026-07-08T20:00:00.000Z')
   })
 
   it('agendar_cita rechaza un horario fuera del horario de atención', async () => {

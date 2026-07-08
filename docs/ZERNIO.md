@@ -50,8 +50,8 @@ Ante cada mensaje entrante de un paciente, el agente puede:
 | Herramienta | Efecto |
 |---|---|
 | `consultar_catalogo` | Lee precios/anticipos/duración VIVOS (nunca inventa) |
-| `consultar_disponibilidad` | Huecos libres reales (horario − bloqueos − citas) |
-| `agendar_cita` | **Aparta** la cita en `pendiente` (reagenda si ya hay una) |
+| `consultar_disponibilidad` | Huecos libres reales (horario − bloqueos − citas; la cita del propio paciente NO le bloquea, porque agendar la mueve) |
+| `agendar_cita` | **Aparta** la cita en `pendiente` (reagenda si ya hay una); valida el hueco y, si está ocupado, devuelve alternativas |
 | `prevalidar_anticipo` | Registra el anticipo en `pendiente` (en revisión) |
 | `clasificar_lead` | Etapa del embudo + nombre en el CRM |
 | `avisar_equipo` / `escalar_a_humano` | Avisos en Notificaciones; el modo IA↔humano solo cambia a mano desde el panel |

@@ -151,7 +151,7 @@ export const CLINICAL_TOOLS = [
   {
     name: 'consultar_disponibilidad',
     description:
-      'Devuelve los próximos huecos LIBRES de la agenda (ya descuenta horario, bloqueos y citas existentes). Úsala antes de proponer una fecha/hora. Ofrécele al paciente máximo dos opciones (una en la mañana y una en la tarde), no toda la lista.',
+      'Devuelve los próximos huecos LIBRES de la agenda (ya descuenta horario, bloqueos y citas — incluida la cita actual del paciente, porque agendar_cita la reagenda). Úsala para OFRECER opciones cuando el paciente aún no propone hora; si ya propuso o aceptó una hora concreta, llama agendar_cita directo. Ofrécele máximo dos opciones (una en la mañana y una en la tarde), no toda la lista, y solo días/horas que vengan en los huecos.',
     input_schema: {
       type: 'object',
       properties: {
@@ -222,7 +222,7 @@ export const CLINICAL_TOOLS = [
   {
     name: 'agendar_cita',
     description:
-      'APARTA una cita para el paciente. La cita queda PENDIENTE hasta que el equipo la confirme en el panel — nunca digas que quedó "confirmada" o "agendada en firme". Si el paciente ya tiene una cita pendiente, esta herramienta la REAGENDA (no crea una segunda). Si el procedimiento requiere anticipo, díselo y pídele el comprobante para prevalidarlo.',
+      'APARTA una cita para el paciente. La cita queda PENDIENTE hasta que el equipo la confirme en el panel — nunca digas que quedó "confirmada" o "agendada en firme". Si el paciente ya tiene una cita pendiente, esta herramienta la REAGENDA (no crea una segunda). Llámala DIRECTO en cuanto el paciente proponga o acepte una hora — ella valida el hueco y, si ya está ocupado, te devuelve huecos_alternativos para ofrecerle otros dos. Si el procedimiento requiere anticipo, díselo y pídele el comprobante para prevalidarlo.',
     input_schema: {
       type: 'object',
       properties: {
