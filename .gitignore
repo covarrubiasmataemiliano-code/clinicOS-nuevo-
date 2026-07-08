@@ -48,6 +48,7 @@ Clinica_Oranza.md
 informacion_ventas_agentes.md
 conversacion-*.json
 ventas/
+informacion conversaciones json/
 
 # herramientas locales del asistente (planes, memoria, ajustes)
 .claude/
