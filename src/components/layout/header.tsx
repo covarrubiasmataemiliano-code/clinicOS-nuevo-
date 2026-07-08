@@ -17,6 +17,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ModeToggle } from "@/components/layout/mode-toggle";
+import { NotificationsButton } from "@/components/layout/notifications-button";
 
 const pageTitles: Record<string, string> = {
   "/concierge": "Concierge",
@@ -73,6 +74,7 @@ export function Header({ onOpenSidebar }: HeaderProps) {
       </div>
 
       <div className="flex items-center gap-1 sm:gap-2">
+        <NotificationsButton />
         <ModeToggle />
 
         <DropdownMenu>
