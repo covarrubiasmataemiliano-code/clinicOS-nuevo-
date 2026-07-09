@@ -1,10 +1,18 @@
 node_modules
 .next
 .git
+.github
+docs
+ventas
+informacion conversaciones json
 dev
 .claude
+coverage
+*.md
+!README.md
 *.log
-.env
-.env.*
 npm-debug.log*
+.env*
+!.env.local.example
+scripts/*.local.*
 .DS_Store
