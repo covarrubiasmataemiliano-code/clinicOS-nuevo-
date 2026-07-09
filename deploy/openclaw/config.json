@@ -1,0 +1,95 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "/home/node/.openclaw/ws-coco",
+      "userTimezone": "America/Mexico_City",
+      "models": {
+        "openrouter/openai/gpt-4o-mini": {}
+      },
+      "model": {
+        "primary": "openrouter/openai/gpt-4o-mini"
+      }
+    },
+    "list": [
+      {
+        "id": "coco",
+        "name": "Coco",
+        "workspace": "/home/node/.openclaw/ws-coco",
+        "agentDir": "/home/node/.openclaw/agents/coco/agent",
+        "model": {
+          "primary": "openrouter/openai/gpt-4o-mini"
+        },
+        "sandbox": {
+          "workspaceAccess": "ro",
+          "scope": "agent"
+        },
+        "tools": {
+          "deny": [
+            "write",
+            "edit",
+            "apply_patch",
+            "browser",
+            "exec",
+            "cron"
+          ]
+        }
+      },
+      {
+        "id": "nugget",
+        "name": "Nugget",
+        "workspace": "/home/node/.openclaw/ws-nugget",
+        "agentDir": "/home/node/.openclaw/agents/nugget/agent",
+        "model": {
+          "primary": "openrouter/openai/gpt-4o-mini"
+        },
+        "sandbox": {
+          "workspaceAccess": "ro",
+          "scope": "agent"
+        },
+        "tools": {
+          "deny": [
+            "write",
+            "edit",
+            "apply_patch",
+            "browser",
+            "exec",
+            "cron"
+          ]
+        }
+      }
+    ]
+  },
+  "gateway": {
+    "mode": "local",
+    "auth": {
+      "mode": "token"
+    },
+    "port": 18789,
+    "bind": "lan",
+    "http": {
+      "endpoints": {
+        "chatCompletions": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "auth": {
+    "profiles": {
+      "openrouter:default": {
+        "provider": "openrouter",
+        "mode": "api_key"
+      }
+    }
+  },
+  "plugins": {
+    "entries": {
+      "openrouter": {
+        "enabled": true
+      }
+    }
+  },
+  "memory": {
+    "backend": "builtin"
+  }
+}

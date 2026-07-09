@@ -1,0 +1,17 @@
+{
+  "gdl": {
+    "address": "Av. General Eulogio Parra 2898, Col. Prados Providencia, Guadalajara",
+    "maps": "https://maps.app.goo.gl/45YUpWCSDqPwajUQ8"
+  },
+  "tuxtla": {
+    "address": "Av. Mérida #1653, Fracc. Residencial Hacienda, Tuxtla Gutiérrez",
+    "maps": "https://maps.google.com/?q=16.762665,-93.130043"
+  },
+  "hospital": {
+    "address": "Hospital São Paulo, Guadalajara",
+    "maps": null
+  },
+  "virtual": {
+    "use_meet": true
+  }
+}

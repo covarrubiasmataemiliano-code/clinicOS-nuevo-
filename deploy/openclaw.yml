@@ -1,0 +1,30 @@
+# clinic-os-lite — OpenClaw gateway (servicio Dokploy SEPARADO, git-driven).
+#
+# Arnés conversacional (Nugget concierge + Coco recepcionista). Gateway OpenAI-compat en :18789.
+# `--allow-unconfigured` = arranca idle sin exigir onboarding (mientras se le da su config real:
+# openclaw.json con bindings + tokens WhatsApp/Telegram + API keys por el env-tab).
+# En dokploy-network para que el engine lo alcance por su hostname interno de Dokploy.
+
+networks:
+  dokploy-network:
+    external: true
+
+volumes:
+  openclaw-data:
+
+services:
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:2026.6.8
+    restart: unless-stopped
+    command: node openclaw.mjs gateway --allow-unconfigured
+    environment:
+      OPENCLAW_GATEWAY_BIND: lan
+      # token de auth del gateway (el bridge del engine lo usa como OPENCLAW_GATEWAY_TOKEN)
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-} # provider LLM del prototipo
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # WHATSAPP_TOKEN / <AGENTE>_TELEGRAM_TOKEN → env-tab de Dokploy
+    volumes:
+      - openclaw-data:/home/node/.openclaw
+      - ../workspaces:/workspaces:ro # workspaces saneados (Nugget/Coco) montados read-only
+    networks: [dokploy-network]
