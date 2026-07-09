@@ -64,9 +64,10 @@ const nextConfig: NextConfig = {
   /**
    * Standalone output for Docker deploys (VPS vía Dokploy). `next build`
    * emite `.next/standalone` con un `server.js` mínimo y solo los
-   * node_modules trazados — la imagen final no necesita `npm install`.
-   * Railway/Hostinger Node gestionado ignoran esto (siguen usando
-   * `next start`), así que es inocuo mientras convivan ambos deploys.
+   * node_modules trazados — la imagen final no necesita `npm install`
+   * (~200MB vs ~2GB con node_modules completo). Railway/Hostinger Node
+   * gestionado ignoran esto (siguen usando `next start`), así que es
+   * inocuo mientras convivan ambos deploys.
    */
   output: "standalone",
 

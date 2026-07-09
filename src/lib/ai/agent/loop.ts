@@ -25,6 +25,7 @@ import {
 } from './tools'
 import { executeClinicalTool } from './execute'
 import { runOpenAiAgent } from './loop-openai'
+import type { AgentHarness } from './harness'
 
 // Re-export para no romper importadores previos (index.ts, tests).
 export type { RunClinicalAgentArgs, RunClinicalAgentResult } from './tools'
@@ -122,17 +123,38 @@ function collectText(blocks: ContentBlock[]): string {
     .trim()
 }
 
+// ------------------------------------------------------------
+// Puerto AgentHarness: adaptadores detrás de una interface común.
+// ------------------------------------------------------------
+
+/** Adaptador nativo: los loops de tool-use in-app (sin cambio alguno). */
+const nativeHarness: AgentHarness = {
+  runTurn: (args) =>
+    args.provider === 'openai' ? runOpenAiAgent(args) : runAnthropicAgent(args),
+}
+
+/** Adaptador externo (OpenClaw/Hermes): mismo tool-loop OpenAI-compat, pero
+ *  contra el gateway (baseUrl+authToken de la config). El gateway HONRA el
+ *  parámetro `tools` → devuelve tool_calls que ejecutamos aquí contra
+ *  Supabase (sin gap de datos). El "brain" externo aporta razonamiento; la
+ *  ejecución determinista y la tenencia siguen del lado de wacrm. */
+const externalHarness: AgentHarness = { runTurn: runOpenAiAgent }
+
+/** Resuelve el arnés para este turno según `backend` (default native). */
+function resolveHarness(backend: RunClinicalAgentArgs['backend']): AgentHarness {
+  return backend && backend !== 'native' ? externalHarness : nativeHarness
+}
+
 /**
- * Corre el agente clínico sobre el inbound actual, despachando al loop
- * del proveedor configurado. Lanza AiError en fallo de red/proveedor
- * (igual que generateReply) — auto-reply.ts lo captura y no rompe el
- * 200 del webhook.
+ * Corre el agente clínico sobre el inbound actual, despachando al arnés
+ * configurado (`args.backend`, default 'native'). Lanza AiError en fallo
+ * de red/proveedor (igual que generateReply) — auto-reply.ts lo captura y
+ * no rompe el 200 del webhook.
  */
 export async function runClinicalAgent(
   args: RunClinicalAgentArgs,
 ): Promise<RunClinicalAgentResult> {
-  if (args.provider === 'openai') return runOpenAiAgent(args)
-  return runAnthropicAgent(args)
+  return resolveHarness(args.backend).runTurn(args)
 }
 
 /** Loop de tool-use contra la Messages API de Anthropic. */

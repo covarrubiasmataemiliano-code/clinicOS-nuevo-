@@ -79,12 +79,25 @@ async function callOpenAi(
   messages: OpenAiMessage[],
   timeoutMs: number,
 ): Promise<OpenAiResponse> {
+  // Endpoint + auth: OpenAI nativo, o un gateway agéntico externo
+  // (OpenClaw/Hermes) cuando la config trae `baseUrl`. El gateway habla
+  // OpenAI-compat y HONRA el parámetro `tools` (devuelve tool_calls) — así
+  // corremos EL MISMO loop: el gateway planea, nosotros ejecutamos las
+  // tools contra Supabase (executeClinicalTool). El "brain" externo aporta
+  // razonamiento/persona/memoria; los datos siguen siendo de wacrm (sin
+  // gap). Native: OPENAI_URL + apiKey. Externo: baseUrl + authToken.
+  const endpoint = args.baseUrl
+    ? `${args.baseUrl.replace(/\/+$/, '')}/chat/completions`
+    : OPENAI_URL
+  const bearer = args.baseUrl ? (args.authToken ?? '') : args.apiKey
+  const label = args.baseUrl ? `AgentGateway(${args.backend})` : 'OpenAI'
+
   let res: Response
   try {
-    res = await fetch(OPENAI_URL, {
+    res = await fetch(endpoint, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${args.apiKey}`,
+        Authorization: `Bearer ${bearer}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -99,7 +112,7 @@ async function callOpenAi(
   } catch (err) {
     throw toNetworkError(err)
   }
-  if (!res.ok) throw await providerHttpError('OpenAI', res)
+  if (!res.ok) throw await providerHttpError(label, res)
   return (await res.json().catch(() => ({}))) as OpenAiResponse
 }
 

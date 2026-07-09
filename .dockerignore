@@ -5,10 +5,14 @@ node_modules
 docs
 ventas
 informacion conversaciones json
+dev
+.claude
+coverage
 *.md
 !README.md
+*.log
+npm-debug.log*
 .env*
 !.env.local.example
 scripts/*.local.*
-coverage
 .DS_Store
