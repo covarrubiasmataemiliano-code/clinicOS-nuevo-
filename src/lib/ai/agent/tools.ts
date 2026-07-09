@@ -18,6 +18,11 @@ import type { ChatMessage } from '../types'
 /** Proveedores capaces de tool-calling para el agente clínico. */
 export type AgentProvider = 'anthropic' | 'openai'
 
+/** Arnés agéntico que atiende el turno. `native` = los loops de tool-use
+ *  in-app (Anthropic/OpenAI, sin cambio). `openclaw`/`hermes` = un gateway
+ *  agéntico externo OpenAI-compat que corre SU propio loop de tools. */
+export type AgentBackend = 'native' | 'openclaw' | 'hermes'
+
 /** Contexto de ejecución compartido por todas las herramientas. */
 export interface AgentToolContext {
   /** Cliente service-role (el ejecutor impone la tenencia por código). */
@@ -71,6 +76,14 @@ export interface RunClinicalAgentArgs {
   apiKey: string
   model: string
   systemPrompt: string
+  /** Arnés que atiende el turno. Default (ausente) = 'native': los loops
+   *  in-app de siempre. 'openclaw'/'hermes' delegan a un gateway externo. */
+  backend?: AgentBackend
+  /** Base URL del gateway externo OpenAI-compat (incluye `/v1`). Solo se
+   *  usa cuando backend ≠ native. */
+  baseUrl?: string
+  /** Bearer token del gateway externo (descifrado). Opcional. */
+  authToken?: string
   /** Turnos recientes de la conversación (de buildConversationContext). */
   messages: ChatMessage[]
   ctx: AgentToolContext
