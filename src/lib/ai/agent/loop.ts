@@ -25,7 +25,6 @@ import {
 } from './tools'
 import { executeClinicalTool } from './execute'
 import { runOpenAiAgent } from './loop-openai'
-import { runExternalAgent } from './loop-external'
 import type { AgentHarness } from './harness'
 
 // Re-export para no romper importadores previos (index.ts, tests).
@@ -134,8 +133,12 @@ const nativeHarness: AgentHarness = {
     args.provider === 'openai' ? runOpenAiAgent(args) : runAnthropicAgent(args),
 }
 
-/** Adaptador externo: delega a un gateway agéntico OpenAI-compat. */
-const externalHarness: AgentHarness = { runTurn: runExternalAgent }
+/** Adaptador externo (OpenClaw/Hermes): mismo tool-loop OpenAI-compat, pero
+ *  contra el gateway (baseUrl+authToken de la config). El gateway HONRA el
+ *  parámetro `tools` → devuelve tool_calls que ejecutamos aquí contra
+ *  Supabase (sin gap de datos). El "brain" externo aporta razonamiento; la
+ *  ejecución determinista y la tenencia siguen del lado de wacrm. */
+const externalHarness: AgentHarness = { runTurn: runOpenAiAgent }
 
 /** Resuelve el arnés para este turno según `backend` (default native). */
 function resolveHarness(backend: RunClinicalAgentArgs['backend']): AgentHarness {

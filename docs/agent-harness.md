@@ -22,8 +22,8 @@ Concierge, Asistente interno) no cambian.
 | Backend | Adaptador | Qué hace |
 |---|---|---|
 | `native` (default) | `loop.ts` / `loop-openai.ts` | Loops de tool-use in-app (Anthropic/OpenAI). **Sin cambio.** Corre los `CLINICAL_TOOLS` scoped a Supabase. |
-| `openclaw` | `loop-external.ts` | Delega a un gateway OpenAI-compat externo (OpenClaw). |
-| `hermes` | `loop-external.ts` | Idem, otra base URL (Hermes). |
+| `openclaw` | `loop-openai.ts` (endpoint externo) | **El mismo tool-loop OpenAI-compat**, contra el gateway. El gateway **honra `tools`** → devuelve `tool_calls` que **wacrm ejecuta** contra Supabase. |
+| `hermes` | `loop-openai.ts` (endpoint externo) | Idem, otra base URL. |
 
 **Lo que NO cambia según el backend** (vive arriba del puerto, en `auto-reply.ts`):
 guardrail determinista + reparación, `claim_ai_reply_slot`, candado humano
@@ -41,19 +41,21 @@ que el resto:
 | `agent_base_url` | Base URL del gateway, **incluye `/v1`** (p. ej. `http://openclaw:18789/v1`) |
 | `agent_auth_token` | Bearer del gateway, **cifrado AES-256-GCM** como `api_key` (NULL si no requiere auth) |
 
-El adaptador externo POSTea a `<agent_base_url>/chat/completions` con
-`{ model, messages }` (system + transcript) y toma `choices[0].message.content`,
-parseando el mismo centinela de handoff que los loops nativos.
+El backend externo corre **el mismo tool-loop** que el path OpenAI nativo
+(`loop-openai.ts`), solo que apuntando al gateway (`agent_base_url` + `agent_auth_token`
+en vez de `api.openai.com` + `apiKey`). Le mandamos los `CLINICAL_TOOLS` de wacrm;
+el gateway planea, devuelve `tool_calls`, y **nosotros los ejecutamos**
+(`executeClinicalTool`, scoped a `account_id`/`contact_id`).
 
-## ⚠️ Gap de datos (v1)
+## Sin gap de datos ✅
 
-OpenClaw/Hermes son **runtimes agénticos completos**: corren su propio loop de
-tools, memoria y persona. El adaptador externo es por eso **brain-only** — el
-arnés externo **redacta**, pero sus acciones (agendar/cobrar) **NO escriben en el
-Supabase de wacrm** (usa sus propias tools, no `CLINICAL_TOOLS`).
+Verificado en vivo (2026-07-08): OpenClaw honra el parámetro `tools` de OpenAI
+(`finish_reason: 'tool_calls'`). Por eso el backend externo **no** es un redactor
+ciego: el "brain" externo aporta razonamiento/persona/memoria, pero **las tools son
+las de wacrm y las ejecuta wacrm** contra su propio Supabase, con la misma tenencia
+y la misma "regla de oro" (la IA solo pre-valida; un humano confirma). No hay dos
+mundos: los datos siempre son de wacrm.
 
-Para que las acciones del arnés externo impacten los datos de wacrm hace falta
-**exponerle las tools de wacrm** (su config apunta a la API pública de wacrm, o un
-callback) — **fase siguiente, no construida en v1.** Mientras tanto, un backend
-externo sirve como redactor; las escrituras deterministas siguen siendo del
-adaptador `native`.
+> Alternativa descartada — *brain-only* (delegar 100% al agente externo con SUS
+> tools/memoria): tendría gap de datos (sus acciones vivirían en su mundo). Se
+> prefirió el tool-loop justo para no fragmentar la fuente de verdad.
