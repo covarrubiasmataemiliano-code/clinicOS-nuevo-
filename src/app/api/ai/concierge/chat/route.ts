@@ -209,7 +209,15 @@ export async function POST(request: Request) {
           const { text } = await runClinicalAgent({
             provider: config.provider,
             apiKey: config.apiKey,
-            model: config.model,
+            // Concierge = Nugget en el arnés externo (Coco es el recepcionista);
+            // en native cae al modelo por-config.
+            model:
+              config.agentBackend && config.agentBackend !== 'native'
+                ? 'openclaw/nugget'
+                : config.model,
+            backend: config.agentBackend,
+            baseUrl: config.agentBaseUrl ?? undefined,
+            authToken: config.agentAuthToken ?? undefined,
             systemPrompt: buildConciergeSystemPrompt({ timezone, now }),
             messages,
             tools: CONCIERGE_TOOLS,
