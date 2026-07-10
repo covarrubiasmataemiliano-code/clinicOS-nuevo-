@@ -1,15 +1,33 @@
 "use client";
 
+/**
+ * BlockScheduleDialog — bloquear un rango de agenda (cirugía, comida,
+ * vacaciones). Soporta rangos multi-día; el calendario los pinta
+ * recortados por día con patrón rayado.
+ */
+
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
 import { toast } from "sonner";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Loader2 } from "lucide-react";
 import { toDateInputValue } from "@/lib/clinic/calendar";
-import { cn } from "@/lib/utils";
 
 interface BlockScheduleDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Día precargado (el día visible del calendario). */
   defaultDate: Date;
   onCreated: () => void;
 }
@@ -40,15 +58,6 @@ export function BlockScheduleDialog({
       setReason("");
     }
   }, [open, defaultDate]);
-
-  useEffect(() => {
-    if (!open) return;
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") onOpenChange(false);
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, onOpenChange]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -94,90 +103,109 @@ export function BlockScheduleDialog({
     }
   }
 
-  if (!open) return null;
-
   return (
-    <>
-      <div className={cn("drawer-backdrop", open && "open")} onClick={() => onOpenChange(false)}></div>
-      <div className={cn("modal", open && "open")} role="dialog" aria-modal="true" aria-label="Bloquear horario">
-        <div className="modal-header">
-          <h3 className="modal-title">Bloquear horario</h3>
-          <button className="drawer-close" onClick={() => onOpenChange(false)}>×</button>
-        </div>
-        
-        <div className="modal-body">
-          <p style={{ color: "var(--text-sub)", fontSize: 13, marginBottom: 16 }}>
-            El rango bloqueado se muestra rayado en el calendario (cirugías, comidas, vacaciones).
-          </p>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="border-border bg-popover text-popover-foreground sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle className="text-popover-foreground">
+            Bloquear horario
+          </DialogTitle>
+          <DialogDescription className="text-muted-foreground">
+            El rango bloqueado se muestra rayado en el calendario (cirugías,
+            comidas, vacaciones).
+          </DialogDescription>
+        </DialogHeader>
 
-          <div className="sheet-grid">
-            <div className="sheet-field">
-              <label>Desde (Fecha)</label>
-              <input 
-                type="date" 
-                className="input nums" 
-                style={{ width: "100%" }}
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-2">
+              <Label htmlFor="bs-start-date" className="text-muted-foreground">
+                Desde
+              </Label>
+              <Input
+                id="bs-start-date"
+                type="date"
                 value={startDate}
                 onChange={(e) => setStartDate(e.target.value)}
+                className="nums border-border bg-muted text-foreground"
               />
             </div>
-            <div className="sheet-field">
-              <label>Hora</label>
-              <input 
-                type="time" 
-                className="input nums" 
-                style={{ width: "100%" }}
+            <div className="space-y-2">
+              <Label htmlFor="bs-start-time" className="text-muted-foreground">
+                Hora
+              </Label>
+              <Input
+                id="bs-start-time"
+                type="time"
                 step={300}
                 value={startTime}
                 onChange={(e) => setStartTime(e.target.value)}
+                className="nums border-border bg-muted text-foreground"
               />
             </div>
           </div>
 
-          <div className="sheet-grid">
-            <div className="sheet-field">
-              <label>Hasta (Fecha)</label>
-              <input 
-                type="date" 
-                className="input nums" 
-                style={{ width: "100%" }}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-2">
+              <Label htmlFor="bs-end-date" className="text-muted-foreground">
+                Hasta
+              </Label>
+              <Input
+                id="bs-end-date"
+                type="date"
                 value={endDate}
                 onChange={(e) => setEndDate(e.target.value)}
+                className="nums border-border bg-muted text-foreground"
               />
             </div>
-            <div className="sheet-field">
-              <label>Hora</label>
-              <input 
-                type="time" 
-                className="input nums" 
-                style={{ width: "100%" }}
+            <div className="space-y-2">
+              <Label htmlFor="bs-end-time" className="text-muted-foreground">
+                Hora
+              </Label>
+              <Input
+                id="bs-end-time"
+                type="time"
                 step={300}
                 value={endTime}
                 onChange={(e) => setEndTime(e.target.value)}
+                className="nums border-border bg-muted text-foreground"
               />
             </div>
           </div>
 
-          <div className="sheet-field">
-            <label>Motivo</label>
-            <input 
-              type="text" 
-              className="input" 
-              placeholder="Cirugía, comida, vacaciones..."
-              style={{ width: "100%" }}
+          <div className="space-y-2">
+            <Label htmlFor="bs-reason" className="text-muted-foreground">
+              Motivo
+            </Label>
+            <Input
+              id="bs-reason"
               value={reason}
               onChange={(e) => setReason(e.target.value)}
+              placeholder="Cirugía, comida, vacaciones…"
+              className="border-border bg-muted text-foreground placeholder:text-muted-foreground"
             />
           </div>
-        </div>
 
-        <div className="modal-footer">
-          <button className="btn outline" onClick={() => onOpenChange(false)} disabled={saving}>Cancelar</button>
-          <button className="btn primary" onClick={handleSubmit} disabled={saving}>
-            {saving ? "Bloqueando..." : "Bloquear"}
-          </button>
-        </div>
-      </div>
-    </>
+          <DialogFooter className="border-border bg-popover">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+              className="border-border text-muted-foreground hover:bg-muted"
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="submit"
+              disabled={saving}
+              className="bg-primary text-primary-foreground hover:bg-primary/90"
+            >
+              {saving && <Loader2 className="size-4 animate-spin" />}
+              Bloquear
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
