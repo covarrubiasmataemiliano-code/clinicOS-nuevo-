@@ -327,4 +327,12 @@ html[data-theme="rose"] {
   .interactive {
     @apply transition-all duration-200 ease-out;
   }
+  /* Oculta el scrollbar en tiras horizontales (chips, filtros) sin perder
+   * el scroll — el gesto/rueda siguen funcionando. */
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
 }
